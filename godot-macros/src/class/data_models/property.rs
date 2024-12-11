@@ -71,6 +71,7 @@ pub fn make_property_impl(class_name: &Ident, fields: &Fields) -> TokenStream {
             notify,
             hint,
             mut usage_flags,
+            ..
         } = var;
 
         let export_hint;

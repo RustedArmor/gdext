@@ -17,7 +17,7 @@ use crate::out;
 pub use sys::GdextBuild;
 
 #[doc(hidden)]
-// TODO consider body safe despite unsafe function, and explicitly mark unsafe {} locations
+#[deny(unsafe_op_in_unsafe_fn)]
 pub unsafe fn __gdext_load_library<E: ExtensionLibrary>(
     get_proc_address: sys::GDExtensionInterfaceGetProcAddress,
     library: sys::GDExtensionClassLibraryPtr,
@@ -41,7 +41,10 @@ pub unsafe fn __gdext_load_library<E: ExtensionLibrary>(
 
         let config = sys::GdextConfig::new(tool_only_in_editor);
 
-        sys::initialize(get_proc_address, library, config);
+        // SAFETY: no custom code has run yet + no other thread is accessing global handle.
+        unsafe {
+            sys::initialize(get_proc_address, library, config);
+        }
 
         // Currently no way to express failure; could be exposed to E if necessary.
         // No early exit, unclear if Godot still requires output parameters to be set.
@@ -54,7 +57,10 @@ pub unsafe fn __gdext_load_library<E: ExtensionLibrary>(
             deinitialize: Some(ffi_deinitialize_layer::<E>),
         };
 
-        *init = godot_init_params;
+        // SAFETY: Godot is responsible for passing us a valid pointer.
+        unsafe {
+            *init = godot_init_params;
+        }
 
         success as u8
     };
@@ -226,6 +232,7 @@ fn gdext_on_level_deinit(level: InitLevel) {
 /// [gdextension]: attr.gdextension.html
 /// [safety]: https://godot-rust.github.io/book/gdext/advanced/safety.html
 // FIXME intra-doc link
+#[doc(alias = "entry_symbol", alias = "entry_point")]
 pub unsafe trait ExtensionLibrary {
     /// Determines if and how an extension's code is run in the editor.
     fn editor_run_behavior() -> EditorRunBehavior {
