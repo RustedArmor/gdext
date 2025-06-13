@@ -18,11 +18,16 @@ mod init_level_test;
 mod object_arg_test;
 mod object_swap_test;
 mod object_test;
+mod oneditor_test;
 mod onready_test;
 mod property_template_test;
 mod property_test;
 mod reentrant_test;
 mod singleton_test;
+// `validate_property` is only supported in Godot 4.2+.
+#[cfg(since_api = "4.2")]
+mod validate_property_test;
+mod virtual_methods_niche_test;
 mod virtual_methods_test;
 
 // Need to test this in the init level method.

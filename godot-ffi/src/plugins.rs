@@ -17,45 +17,17 @@
 #[macro_export]
 macro_rules! plugin_registry {
     ($vis:vis $registry:ident: $Type:ty) => {
-        $crate::paste::paste! {
-            #[used]
-            #[allow(non_upper_case_globals)]
-            #[doc(hidden)]
-            $vis static [< __godot_rust_plugin_ $registry >]:
-                std::sync::Mutex<Vec<$Type>> = std::sync::Mutex::new(Vec::new());
-        }
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
-#[allow(clippy::deprecated_cfg_attr)]
-#[cfg_attr(rustfmt, rustfmt::skip)]
-// ^ skip: paste's [< >] syntax chokes fmt
-//   cfg_attr: workaround for https://github.com/rust-lang/rust/pull/52234#issuecomment-976702997
-macro_rules! plugin_execute_pre_main_wasm {
-    ($gensym:ident,) => {
-        // Rust presently requires that statics with a custom `#[link_section]` must be a simple
-        // list of bytes on the wasm target (with no extra levels of indirection such as references).
-        //
-        // As such, instead we export a fn with a random name of predictable format to be used
-        // by the embedder.
-        $crate::paste::paste! {
-            #[no_mangle]
-            extern "C" fn [< rust_gdext_registrant_ $gensym >] () {
-                __init();
-            }
-        }
+        #[used]
+        #[allow(non_upper_case_globals)]
+        #[doc(hidden)]
+        $vis static $registry: std::sync::Mutex<Vec<$Type>>
+                             = std::sync::Mutex::new(Vec::new());
     };
 }
 
 /// Executes a block of code before main, by utilising platform specific linker instructions.
 #[doc(hidden)]
 #[macro_export]
-#[allow(clippy::deprecated_cfg_attr)]
-#[cfg_attr(rustfmt, rustfmt::skip)]
-// ^ skip: paste's [< >] syntax chokes fmt
-//   cfg_attr: workaround for https://github.com/rust-lang/rust/pull/52234#issuecomment-976702997
 macro_rules! plugin_execute_pre_main {
     ($body:expr) => {
         const _: () = {
@@ -63,7 +35,7 @@ macro_rules! plugin_execute_pre_main {
             #[used]
             // Windows:
             #[cfg_attr(target_os = "windows", link_section = ".CRT$XCU")]
-            // MacOS + iOS:
+            // macOS + iOS:
             #[cfg_attr(target_os = "ios", link_section = "__DATA,__mod_init_func")]
             #[cfg_attr(target_os = "macos", link_section = "__DATA,__mod_init_func")]
             // Linux, Android, BSD:
@@ -82,49 +54,38 @@ macro_rules! plugin_execute_pre_main {
                 __inner_init
             };
 
-            #[cfg(target_family = "wasm")]
-            $crate::gensym! { $crate::plugin_execute_pre_main_wasm!() }
+            $crate::wasm_declare_init_fn!();
         };
     };
 }
 
-/// register a plugin by executing code pre-main that adds the plugin to the plugin registry
+/// Register a plugin by executing code pre-main that adds the plugin to the registry.
 #[doc(hidden)]
 #[macro_export]
-#[allow(clippy::deprecated_cfg_attr)]
-#[cfg_attr(rustfmt, rustfmt::skip)]
-// ^ skip: paste's [< >] syntax chokes fmt
-//   cfg_attr: workaround for https://github.com/rust-lang/rust/pull/52234#issuecomment-976702997
 macro_rules! plugin_add_inner {
-    ($registry:ident; $plugin:expr; $( $path_tt:tt )* ) => {
+    ($registry:path; $plugin:expr) => {
         $crate::plugin_execute_pre_main!({
-            let mut guard = $crate::paste::paste!( $( $path_tt )* [< __godot_rust_plugin_ $registry >] )
-                .lock()
-                .unwrap();
+            let mut guard = $registry.lock().unwrap();
+
             guard.push($plugin);
         });
     };
 }
 
-/// Register a plugin to a registry
+/// Register a plugin to a registry.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! plugin_add {
-    ( $registry:ident; $plugin:expr ) => {
-		$crate::plugin_add_inner!($registry; $plugin; );
-	};
-
-    ( $registry:ident in $path:path; $plugin:expr ) => {
-		$crate::plugin_add_inner!($registry; $plugin; $path ::);
+    ( $registry:path; $plugin:expr ) => {
+		$crate::plugin_add_inner!($registry; $plugin);
 	};
 }
 
-/// Iterate over all plugins in unspecified order
 #[doc(hidden)]
 #[macro_export]
 macro_rules! plugin_foreach_inner {
     ( $registry:ident; $closure:expr; $( $path_tt:tt )* ) => {
-        let guard = $crate::paste::paste!( $( $path_tt )* [< __godot_rust_plugin_ $registry >] )
+        let guard = $( $path_tt )* $registry
             .lock()
             .unwrap();
 
@@ -135,7 +96,7 @@ macro_rules! plugin_foreach_inner {
     };
 }
 
-/// Register a plugin to a registry
+/// Iterate over all plugins in unspecified order.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! plugin_foreach {

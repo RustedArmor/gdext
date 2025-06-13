@@ -58,9 +58,7 @@ macro_rules! impl_packed_array {
             $($trait_impls:tt)*
         },
     ) => {
-        // TODO expand type names in doc comments (use e.g. `paste` crate)
-        #[doc = concat!("Implements Godot's `", stringify!($PackedArray), "` type,")]
-        #[doc = concat!("which is a space-efficient array of `", stringify!($Element), "`s.")]
+        #[doc = concat!("Space-efficient array of [`", stringify!($Element), "`] elements.")]
         ///
         /// Check out the [book](https://godot-rust.github.io/book/godot-api/builtins.html#packed-arrays) for a tutorial on packed arrays.
         ///
@@ -627,9 +625,7 @@ macro_rules! impl_packed_array {
         }
 
         unsafe impl GodotFfi for $PackedArray {
-            fn variant_type() -> sys::VariantType {
-                sys::VariantType::$VariantType
-            }
+            const VARIANT_TYPE: sys::VariantType = sys::VariantType::$VariantType;
 
             ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque; .. }
         }

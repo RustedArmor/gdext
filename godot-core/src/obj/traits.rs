@@ -10,8 +10,9 @@ use crate::builtin::GString;
 use crate::init::InitLevel;
 use crate::meta::ClassName;
 use crate::obj::{bounds, Base, BaseMut, BaseRef, Bounds, Gd};
+#[cfg(since_api = "4.2")]
+use crate::registry::signal::SignalObject;
 use crate::storage::Storage;
-
 use godot_ffi as sys;
 
 /// Makes `T` eligible to be managed by Godot and stored in [`Gd<T>`][crate::obj::Gd] pointers.
@@ -21,7 +22,7 @@ use godot_ffi as sys;
 /// Normally, you don't need to implement this trait yourself; use [`#[derive(GodotClass)]`](../register/derive.GodotClass.html) instead.
 // Above intra-doc link to the derive-macro only works as HTML, not as symbol link.
 #[diagnostic::on_unimplemented(
-    message = "Only classes registered with Godot are allowed in this context",
+    message = "only classes registered with Godot are allowed in this context",
     note = "you can use `#[derive(GodotClass)]` to register your own structs with Godot",
     note = "see also: https://godot-rust.github.io/book/register/classes.html"
 )]
@@ -147,7 +148,10 @@ unsafe impl<T: GodotClass> Inherits<T> for T {}
 // Note: technically, `Trait` doesn't _have to_ implement `Self`. The Rust type system provides no way to verify that a) D is a trait object,
 // and b) that the trait behind it is implemented for the class. Thus, users could any another reference type, such as `&str` pointing to a field.
 // This should be safe, since lifetimes are checked throughout and the class instance remains in place (pinned) inside a DynGd.
-pub trait AsDyn<Trait: ?Sized>: GodotClass {
+pub trait AsDyn<Trait>: GodotClass
+where
+    Trait: ?Sized + 'static,
+{
     fn dyn_upcast(&self) -> &Trait;
     fn dyn_upcast_mut(&mut self) -> &mut Trait;
 }
@@ -261,8 +265,8 @@ pub trait IndexEnum: EngineEnum {
 // Possible alternative for builder APIs, although even less ergonomic: Base<T> could be Base<T, Self> and return Gd<Self>.
 #[diagnostic::on_unimplemented(
     message = "Class `{Self}` requires a `Base<T>` field",
-    label = "missing field `_base: Base<...>`",
-    note = "A base field is required to access the base from within `self`, for script-virtual functions or #[rpc] methods",
+    label = "missing field `_base: Base<...>` in struct declaration",
+    note = "a base field is required to access the base from within `self`, as well as for #[signal], #[rpc] and #[func(virtual)]",
     note = "see also: https://godot-rust.github.io/book/register/classes.html#the-base-field"
 )]
 pub trait WithBaseField: GodotClass + Bounds<Declarer = bounds::DeclUser> {
@@ -293,7 +297,7 @@ pub trait WithBaseField: GodotClass + Bounds<Declarer = bounds::DeclUser> {
     ///
     /// #[godot_api]
     /// impl INode for MyClass {
-    ///     fn process(&mut self, _delta: f64) {
+    ///     fn process(&mut self, _delta: f32) {
     ///         let name = self.base().get_name();
     ///         godot_print!("name is {name}");
     ///     }
@@ -319,7 +323,7 @@ pub trait WithBaseField: GodotClass + Bounds<Declarer = bounds::DeclUser> {
     ///
     /// #[godot_api]
     /// impl INode for MyClass {
-    ///     fn process(&mut self, _delta: f64) {
+    ///     fn process(&mut self, _delta: f32) {
     ///         let node = Node::new_alloc();
     ///         // fails because `add_child` requires a mutable reference.
     ///         self.base().add_child(&node);
@@ -342,7 +346,9 @@ pub trait WithBaseField: GodotClass + Bounds<Declarer = bounds::DeclUser> {
     /// Returns a mutable reference suitable for calling engine methods on this object.
     ///
     /// This method will allow you to call back into the same object from Godot, unlike what would happen
-    /// if you used [`to_gd()`](WithBaseField::to_gd).
+    /// if you used [`to_gd()`](WithBaseField::to_gd). You have to keep the `BaseRef` guard bound for the entire duration the engine might
+    /// re-enter a function of your class. The guard temporarily absorbs the `&mut self` reference, which allows for an additional mutable
+    /// reference to be acquired.
     ///
     /// Holding a mutable guard prevents other code paths from obtaining _any_ reference to `self`, as such it is recommended to drop the
     /// guard as soon as you no longer need it.
@@ -360,7 +366,7 @@ pub trait WithBaseField: GodotClass + Bounds<Declarer = bounds::DeclUser> {
     ///
     /// #[godot_api]
     /// impl INode for MyClass {
-    ///     fn process(&mut self, _delta: f64) {
+    ///     fn process(&mut self, _delta: f32) {
     ///         let node = Node::new_alloc();
     ///         self.base_mut().add_child(&node);
     ///     }
@@ -385,7 +391,7 @@ pub trait WithBaseField: GodotClass + Bounds<Declarer = bounds::DeclUser> {
     ///
     /// #[godot_api]
     /// impl INode for MyClass {
-    ///     fn process(&mut self, _delta: f64) {
+    ///     fn process(&mut self, _delta: f32) {
     ///         self.base_mut().call("other_method", &[]);
     ///     }
     /// }
@@ -428,11 +434,97 @@ pub trait WithBaseField: GodotClass + Bounds<Declarer = bounds::DeclUser> {
     }
 }
 
+// Dummy traits to still allow bounds and imports.
+#[cfg(before_api = "4.2")]
+pub trait WithSignals: GodotClass {}
+#[cfg(before_api = "4.2")]
+pub trait WithUserSignals: WithSignals + WithBaseField {}
+
+/// Implemented for all classes with registered signals, both engine- and user-declared.
+///
+/// This trait enables the [`Gd::signals()`] method.
+///
+/// User-defined classes with `#[signal]` additionally implement [`WithUserSignals`].
+#[cfg(since_api = "4.2")]
+// Inherits bound makes some up/downcasting in signals impl easier.
+pub trait WithSignals: GodotClass + Inherits<crate::classes::Object> {
+    /// The associated struct listing all signals of this class.
+    ///
+    /// Parameters:
+    /// - `'c` denotes the lifetime during which the class instance is borrowed and its signals can be modified.
+    /// - `C` is the concrete class on which the signals are provided. This can be different than `Self` in case of derived classes
+    ///   (e.g. a user-defined node) connecting/emitting signals of a base class (e.g. `Node`).
+    type SignalCollection<'c, C>
+    where
+        C: WithSignals;
+
+    /// Whether the representation needs to be able to hold just `Gd` (for engine classes) or `UserSignalObject` (for user classes).
+    // Note: this cannot be in Declarer (Engine/UserDecl) as associated type `type SignalObjectType<'c, T: WithSignals>`,
+    // because the user impl has the additional requirement T: WithUserSignals.
+    #[doc(hidden)]
+    type __SignalObj<'c>: SignalObject<'c>;
+    // type __SignalObj<'c, C>: SignalObject<'c>
+    // where
+    //     C: WithSignals + 'c;
+
+    /// Create from existing `Gd`, to enable `Gd::signals()`.
+    ///
+    /// Only used for constructing from a concrete class, so `C = Self` in the return type.
+    ///
+    /// Takes by reference and not value, to retain lifetime chain.
+    #[doc(hidden)]
+    fn __signals_from_external(external: &Gd<Self>) -> Self::SignalCollection<'_, Self>;
+}
+
+/// Implemented for user-defined classes with at least one `#[signal]` declaration.
+///
+/// Allows to access signals from within the class, as `self.signals()`. This requires a `Base<T>` field.
+#[cfg(since_api = "4.2")]
+pub trait WithUserSignals: WithSignals + WithBaseField {
+    /// Access user-defined signals of the current object `self`.
+    ///
+    /// For classes that have at least one `#[signal]` defined, returns a collection of signal names. Each returned signal has a specialized
+    /// API for connecting and emitting signals in a type-safe way. If you need to access signals from outside (given a `Gd` pointer), use
+    /// [`Gd::signals()`] instead.
+    ///
+    /// If you haven't already, read the [book chapter about signals](https://godot-rust.github.io/book/register/signals.html) for a
+    /// walkthrough.
+    ///
+    /// # Provided API
+    ///
+    /// The returned collection provides a method for each signal, with the same name as the corresponding `#[signal]`.  \
+    /// For example, if you have...
+    /// ```ignore
+    /// #[signal]
+    /// fn damage_taken(&mut self, amount: i32);
+    /// ```
+    /// ...then you can access the signal as `self.signals().damage_taken()`, which returns an object with the following API:
+    /// ```ignore
+    /// // Connects global or associated function, or a closure.
+    /// fn connect(f: impl FnMut(i32));
+    ///
+    /// // Connects a &mut self method or closure on the emitter object.
+    /// fn connect_self(f: impl FnMut(&mut Self, i32));
+    ///
+    /// // Connects a &mut self method or closure on another object.
+    /// fn connect_other<C>(f: impl FnMut(&mut C, i32));
+    ///
+    /// // Emits the signal with the given arguments.
+    /// fn emit(amount: i32);
+    /// ```
+    ///
+    /// See [`TypedSignal`](crate::registry::signal::TypedSignal) for more information.
+    fn signals(&mut self) -> Self::SignalCollection<'_, Self>;
+}
+
 /// Extension trait for all reference-counted classes.
 pub trait NewGd: GodotClass {
     /// Return a new, ref-counted `Gd` containing a default-constructed instance.
     ///
     /// `MyClass::new_gd()` is equivalent to `Gd::<MyClass>::default()`.
+    ///
+    /// # Panics
+    /// If `Self` is user-defined and its default constructor `init()` panics, that panic is propagated.
     fn new_gd() -> Gd<Self>;
 }
 
@@ -451,6 +543,9 @@ pub trait NewAlloc: GodotClass {
     ///
     /// The result must be manually managed, e.g. by attaching it to the scene tree or calling `free()` after usage.
     /// Failure to do so will result in memory leaks.
+    ///
+    /// # Panics
+    /// If `Self` is user-defined and its default constructor `init()` panics, that panic is propagated to the caller.
     #[must_use]
     fn new_alloc() -> Gd<Self>;
 }
@@ -472,6 +567,7 @@ where
 pub mod cap {
     use super::*;
     use crate::builtin::{StringName, Variant};
+    use crate::meta::PropertyInfo;
     use crate::obj::{Base, Bounds, Gd};
     use std::any::Any;
 
@@ -492,8 +588,8 @@ pub mod cap {
     #[diagnostic::on_unimplemented(
         message = "Class `{Self}` requires either an `init` constructor, or explicit opt-out",
         label = "needs `init`",
-        note = "To provide a default constructor, use `#[class(init)]` or implement an `init` method",
-        note = "To opt out, use `#[class(no_init)]`",
+        note = "to provide a default constructor, use `#[class(init)]` or implement an `init` method",
+        note = "to opt out, use `#[class(no_init)]`",
         note = "see also: https://godot-rust.github.io/book/register/constructors.html"
     )]
     pub trait GodotDefault: GodotClass {
@@ -571,6 +667,13 @@ pub mod cap {
         fn __godot_property_get_revert(&self, property: StringName) -> Option<Variant>;
     }
 
+    #[doc(hidden)]
+    #[cfg(since_api = "4.2")]
+    pub trait GodotValidateProperty: GodotClass {
+        #[doc(hidden)]
+        fn __godot_validate_property(&self, property: &mut PropertyInfo);
+    }
+
     /// Auto-implemented for `#[godot_api] impl MyClass` blocks
     pub trait ImplementsGodotApi: GodotClass {
         #[doc(hidden)]
@@ -588,10 +691,15 @@ pub mod cap {
 
     /// Auto-implemented for `#[godot_api] impl XyVirtual for MyClass` blocks
     pub trait ImplementsGodotVirtual: GodotClass {
+        // Cannot use #[cfg(since_api = "4.4")] on the `hash` parameter, because the doc-postprocessing generates #[doc(cfg)],
+        // which isn't valid in parameter position.
+
+        #[cfg(before_api = "4.4")]
         #[doc(hidden)]
-        fn __virtual_call(
-            name: &str,
-            #[cfg(since_api = "4.4")] hash: u32,
-        ) -> sys::GDExtensionClassCallVirtual;
+        fn __virtual_call(name: &str) -> sys::GDExtensionClassCallVirtual;
+
+        #[cfg(since_api = "4.4")]
+        #[doc(hidden)]
+        fn __virtual_call(name: &str, hash: u32) -> sys::GDExtensionClassCallVirtual;
     }
 }

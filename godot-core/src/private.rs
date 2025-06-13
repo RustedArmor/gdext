@@ -12,19 +12,23 @@ pub use crate::registry::plugin::{
     ClassPlugin, DynTraitImpl, ErasedDynGd, ErasedRegisterFn, ITraitImpl, InherentImpl, PluginItem,
     Struct,
 };
+#[cfg(since_api = "4.2")]
+pub use crate::registry::signal::priv_re_export::*;
 pub use crate::storage::{as_storage, Storage};
 pub use sys::out;
 
 #[cfg(feature = "trace")]
 pub use crate::meta::trace;
+#[cfg(debug_assertions)]
+use std::cell::RefCell;
 
 use crate::global::godot_error;
 use crate::meta::error::CallError;
 use crate::meta::CallContext;
-use crate::sys;
+use crate::obj::Gd;
+use crate::{classes, sys};
+use std::io::Write;
 use std::sync::atomic;
-#[cfg(debug_assertions)]
-use std::sync::{Arc, Mutex};
 use sys::Global;
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
@@ -136,7 +140,7 @@ pub(crate) fn iterate_plugins(mut visitor: impl FnMut(&ClassPlugin)) {
 #[cfg(feature = "codegen-full")] // Remove if used in other scenarios.
 pub(crate) fn find_inherent_impl(class_name: crate::meta::ClassName) -> Option<InherentImpl> {
     // We do this manually instead of using `iterate_plugins()` because we want to break as soon as we find a match.
-    let plugins = __godot_rust_plugin___GODOT_PLUGIN_REGISTRY.lock().unwrap();
+    let plugins = __GODOT_PLUGIN_REGISTRY.lock().unwrap();
 
     plugins.iter().find_map(|elem| {
         if elem.class_name == class_name {
@@ -180,11 +184,6 @@ pub unsafe fn has_virtual_script_method(
     sys::interface_fn!(object_has_script_method)(sys::to_const_ptr(object_ptr), method_sname) != 0
 }
 
-pub fn flush_stdout() {
-    use std::io::Write;
-    std::io::stdout().flush().expect("flush stdout");
-}
-
 /// Ensure `T` is an editor plugin.
 pub const fn is_editor_plugin<T: crate::obj::Inherits<crate::classes::EditorPlugin>>() {}
 
@@ -219,17 +218,9 @@ pub fn is_class_runtime(is_tool: bool) -> bool {
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
-// Panic handling
+// Panic *hook* management
 
-#[cfg(debug_assertions)]
-#[derive(Debug)]
-struct GodotPanicInfo {
-    line: u32,
-    file: String,
-    //backtrace: Backtrace, // for future use
-}
-
-pub fn extract_panic_message(err: Box<dyn std::any::Any + Send>) -> String {
+pub fn extract_panic_message(err: &(dyn Send + std::any::Any)) -> String {
     if let Some(s) = err.downcast_ref::<&'static str>() {
         s.to_string()
     } else if let Some(s) = err.downcast_ref::<String>() {
@@ -239,16 +230,85 @@ pub fn extract_panic_message(err: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-fn format_panic_message(msg: String) -> String {
+pub fn format_panic_message(panic_info: &std::panic::PanicHookInfo) -> String {
+    let mut msg = extract_panic_message(panic_info.payload());
+
+    if let Some(context) = get_gdext_panic_context() {
+        msg = format!("{msg}\nContext: {context}");
+    }
+
+    let prefix = if let Some(location) = panic_info.location() {
+        format!("panic {}:{}", location.file(), location.line())
+    } else {
+        "panic".to_string()
+    };
+
     // If the message contains newlines, print all of the lines after a line break, and indent them.
     let lbegin = "\n  ";
     let indented = msg.replace('\n', lbegin);
 
     if indented.len() != msg.len() {
-        format!("[panic]{lbegin}{indented}")
+        format!("[{prefix}]{lbegin}{indented}")
     } else {
-        format!("[panic]  {msg}")
+        format!("[{prefix}]  {msg}")
     }
+}
+
+// Macro instead of function, to avoid 1 extra frame in backtrace.
+#[cfg(debug_assertions)]
+#[macro_export]
+macro_rules! format_backtrace {
+    ($prefix:expr, $backtrace:expr) => {{
+        use std::backtrace::BacktraceStatus;
+
+        let backtrace = $backtrace;
+
+        match backtrace.status() {
+            BacktraceStatus::Captured => format!("\n[{}]\n{}\n", $prefix, backtrace),
+            BacktraceStatus::Disabled => {
+                "(backtrace disabled, run application with `RUST_BACKTRACE=1` environment variable)"
+                    .to_string()
+            }
+            BacktraceStatus::Unsupported => {
+                "(backtrace unsupported for current platform)".to_string()
+            }
+            _ => "(backtrace status unknown)".to_string(),
+        }
+    }};
+
+    ($prefix:expr) => {
+        $crate::format_backtrace!($prefix, std::backtrace::Backtrace::capture())
+    };
+}
+
+#[cfg(not(debug_assertions))]
+#[macro_export]
+macro_rules! format_backtrace {
+    ($prefix:expr $(, $backtrace:expr)? ) => {
+        String::new()
+    };
+}
+
+pub fn set_gdext_hook<F>(godot_print: F)
+where
+    F: Fn() -> bool + Send + Sync + 'static,
+{
+    std::panic::set_hook(Box::new(move |panic_info| {
+        // Flush, to make sure previous Rust output (e.g. test announcement, or debug prints during app) have been printed.
+        let _ignored_result = std::io::stdout().flush();
+
+        let message = format_panic_message(panic_info);
+        if godot_print() {
+            // Also prints to stdout/stderr -- do not print twice.
+            godot_error!("{message}");
+        } else {
+            eprintln!("{message}");
+        }
+
+        let backtrace = format_backtrace!("panic backtrace");
+        eprintln!("{backtrace}");
+        let _ignored_result = std::io::stderr().flush();
+    }));
 }
 
 pub fn set_error_print_level(level: u8) -> u8 {
@@ -261,19 +321,102 @@ pub(crate) fn has_error_print_level(level: u8) -> bool {
     ERROR_PRINT_LEVEL.load(atomic::Ordering::Relaxed) >= level
 }
 
+/// Internal type used to store context information for debug purposes. Debug context is stored on the thread-local
+/// ERROR_CONTEXT_STACK, which can later be used to retrieve the current context in the event of a panic. This value
+/// probably shouldn't be used directly; use ['get_gdext_panic_context()'](get_gdext_panic_context) instead.
+#[cfg(debug_assertions)]
+struct ScopedFunctionStack {
+    functions: Vec<*const dyn Fn() -> String>,
+}
+
+#[cfg(debug_assertions)]
+impl ScopedFunctionStack {
+    /// # Safety
+    /// Function must be removed (using [`pop_function()`](Self::pop_function)) before lifetime is invalidated.
+    unsafe fn push_function(&mut self, function: &dyn Fn() -> String) {
+        let function = std::ptr::from_ref(function);
+        #[allow(clippy::unnecessary_cast)]
+        let function = function as *const (dyn Fn() -> String + 'static);
+        self.functions.push(function);
+    }
+
+    fn pop_function(&mut self) {
+        self.functions.pop().expect("function stack is empty!");
+    }
+
+    fn get_last(&self) -> Option<String> {
+        self.functions.last().cloned().map(|pointer| {
+            // SAFETY:
+            // Invariants provided by push_function assert that any and all functions held by ScopedFunctionStack
+            // are removed before they are invalidated; functions must always be valid.
+            unsafe { (*pointer)() }
+        })
+    }
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static ERROR_CONTEXT_STACK: RefCell<ScopedFunctionStack> = const {
+        RefCell::new(ScopedFunctionStack { functions: Vec::new() })
+    }
+}
+
+// Value may return `None`, even from panic hook, if called from a non-Godot thread.
+pub fn get_gdext_panic_context() -> Option<String> {
+    #[cfg(debug_assertions)]
+    return ERROR_CONTEXT_STACK.with(|cell| cell.borrow().get_last());
+
+    #[cfg(not(debug_assertions))]
+    None
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+// Panic unwinding and catching
+
+pub struct PanicPayload {
+    payload: Box<dyn std::any::Any + Send + 'static>,
+}
+
+impl PanicPayload {
+    pub fn new(payload: Box<dyn std::any::Any + Send + 'static>) -> Self {
+        Self { payload }
+    }
+
+    // While this could be `&self`, it's usually good practice to pass panic payloads around linearly and have only 1 representation at a time.
+    pub fn into_panic_message(self) -> String {
+        extract_panic_message(self.payload.as_ref())
+    }
+
+    pub fn repanic(self) -> ! {
+        std::panic::resume_unwind(self.payload)
+    }
+}
+
 /// Executes `code`. If a panic is thrown, it is caught and an error message is printed to Godot.
 ///
 /// Returns `Err(message)` if a panic occurred, and `Ok(result)` with the result of `code` otherwise.
 ///
 /// In contrast to [`handle_varcall_panic`] and [`handle_ptrcall_panic`], this function is not intended for use in `try_` functions,
 /// where the error is propagated as a `CallError` in a global variable.
-pub fn handle_panic<E, F, R, S>(error_context: E, code: F) -> Result<R, String>
+pub fn handle_panic<E, F, R>(error_context: E, code: F) -> Result<R, PanicPayload>
 where
-    E: FnOnce() -> S,
+    E: Fn() -> String,
     F: FnOnce() -> R + std::panic::UnwindSafe,
-    S: std::fmt::Display,
 {
-    handle_panic_with_print(error_context, code, has_error_print_level(1))
+    #[cfg(not(debug_assertions))]
+    let _ = error_context; // Unused in Release.
+
+    #[cfg(debug_assertions)]
+    ERROR_CONTEXT_STACK.with(|cell| unsafe {
+        // SAFETY: &error_context is valid for lifetime of function, and is removed from LAST_ERROR_CONTEXT before end of function.
+        cell.borrow_mut().push_function(&error_context)
+    });
+
+    let result = std::panic::catch_unwind(code).map_err(PanicPayload::new);
+
+    #[cfg(debug_assertions)]
+    ERROR_CONTEXT_STACK.with(|cell| cell.borrow_mut().pop_function());
+    result
 }
 
 // TODO(bromeon): make call_ctx lazy-evaluated (like error_ctx) everywhere;
@@ -285,8 +428,8 @@ pub fn handle_varcall_panic<F, R>(
 ) where
     F: FnOnce() -> Result<R, CallError> + std::panic::UnwindSafe,
 {
-    let outcome: Result<Result<R, CallError>, String> =
-        handle_panic_with_print(|| call_ctx, code, false);
+    let outcome: Result<Result<R, CallError>, PanicPayload> =
+        handle_panic(|| call_ctx.to_string(), code);
 
     let call_error = match outcome {
         // All good.
@@ -315,14 +458,14 @@ pub fn handle_ptrcall_panic<F, R>(call_ctx: &CallContext, code: F)
 where
     F: FnOnce() -> R + std::panic::UnwindSafe,
 {
-    let outcome: Result<R, String> = handle_panic_with_print(|| call_ctx, code, false);
+    let outcome: Result<R, PanicPayload> = handle_panic(|| call_ctx.to_string(), code);
 
     let call_error = match outcome {
         // All good.
         Ok(_result) => return,
 
         // Panic occurred (typically through user): forward message.
-        Err(panic_msg) => CallError::failed_by_user_panic(call_ctx, panic_msg),
+        Err(payload) => CallError::failed_by_user_panic(call_ctx, payload),
     };
 
     let _id = report_call_error(call_error, false);
@@ -344,102 +487,27 @@ fn report_call_error(call_error: CallError, track_globally: bool) -> i32 {
     }
 }
 
-fn handle_panic_with_print<E, F, R, S>(error_context: E, code: F, print: bool) -> Result<R, String>
-where
-    E: FnOnce() -> S,
-    F: FnOnce() -> R + std::panic::UnwindSafe,
-    S: std::fmt::Display,
-{
-    #[cfg(debug_assertions)]
-    let info: Arc<Mutex<Option<GodotPanicInfo>>> = Arc::new(Mutex::new(None));
+// Currently unused; implemented due to temporary need and may come in handy.
+pub fn rebuild_gd(object_ref: &classes::Object) -> Gd<classes::Object> {
+    let ptr = object_ref.__object_ptr();
 
-    // Back up previous hook, set new one.
-    #[cfg(debug_assertions)]
-    let prev_hook = {
-        let info = info.clone();
-        let prev_hook = std::panic::take_hook();
-
-        std::panic::set_hook(Box::new(move |panic_info| {
-            if let Some(location) = panic_info.location() {
-                *info.lock().unwrap() = Some(GodotPanicInfo {
-                    file: location.file().to_string(),
-                    line: location.line(),
-                    //backtrace: Backtrace::capture(),
-                });
-            } else {
-                eprintln!("panic occurred, but can't get location information");
-            }
-        }));
-
-        prev_hook
-    };
-
-    // Run code that should panic, restore hook.
-    let panic = std::panic::catch_unwind(code);
-
-    // Restore the previous panic hook if in Debug mode.
-    #[cfg(debug_assertions)]
-    std::panic::set_hook(prev_hook);
-
-    match panic {
-        Ok(result) => Ok(result),
-        Err(err) => {
-            // Flush, to make sure previous Rust output (e.g. test announcement, or debug prints during app) have been printed
-            // TODO write custom panic handler and move this there, before panic backtrace printing.
-            flush_stdout();
-
-            // Handle panic info only in Debug mode.
-            #[cfg(debug_assertions)]
-            {
-                let msg = extract_panic_message(err);
-                let mut msg = format_panic_message(msg);
-
-                // Try to add location information.
-                if let Ok(guard) = info.lock() {
-                    if let Some(info) = guard.as_ref() {
-                        msg = format!("{}\n  at {}:{}", msg, info.file, info.line);
-                    }
-                }
-
-                if print {
-                    godot_error!(
-                        "Rust function panicked: {}\n  Context: {}",
-                        msg,
-                        error_context()
-                    );
-                    //eprintln!("Backtrace:\n{}", info.backtrace);
-                }
-
-                Err(msg)
-            }
-
-            #[cfg(not(debug_assertions))]
-            {
-                let _ = error_context; // Unused warning.
-                let msg = extract_panic_message(err);
-                let msg = format_panic_message(msg);
-
-                if print {
-                    godot_error!("{msg}");
-                }
-
-                Err(msg)
-            }
-        }
-    }
+    // SAFETY: ptr comes from valid internal API (and is non-null, so unwrap in from_obj_sys won't fail).
+    unsafe { Gd::from_obj_sys(ptr) }
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use super::{CallError, CallErrors};
+    use super::{CallError, CallErrors, PanicPayload};
     use crate::meta::CallContext;
 
     fn make(index: usize) -> CallError {
         let method_name = format!("method_{index}");
         let ctx = CallContext::func("Class", &method_name);
-        CallError::failed_by_user_panic(&ctx, "some panic reason".to_string())
+        let payload = PanicPayload::new(Box::new("some panic reason".to_string()));
+
+        CallError::failed_by_user_panic(&ctx, payload)
     }
 
     #[test]

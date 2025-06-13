@@ -73,12 +73,6 @@ impl_vector_fns!(Vector4i, glam::IVec4, i32, (x, y, z, w));
 impl Vector4i {
     inline_impl_integer_vector_fns!(Vector4, x, y, z, w);
 
-    #[deprecated = "Moved to `Vector4::cast_int()`"]
-    #[inline]
-    pub const fn from_vector4(v: Vector4) -> Self {
-        v.cast_int()
-    }
-
     /// Converts `self` to the corresponding [`real`] `glam` type.
     #[doc(hidden)]
     #[inline]
@@ -111,9 +105,7 @@ impl fmt::Display for Vector4i {
 // SAFETY:
 // This type is represented as `Self` in Godot, so `*mut Self` is sound.
 unsafe impl GodotFfi for Vector4i {
-    fn variant_type() -> sys::VariantType {
-        sys::VariantType::VECTOR4I
-    }
+    const VARIANT_TYPE: sys::VariantType = sys::VariantType::VECTOR4I;
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }

@@ -35,6 +35,7 @@
 //! * [`tools`], higher-level utilities that extend the generated code, e.g. `load<T>()`.
 //! * [`meta`], fundamental information about types, properties and conversions.
 //! * [`init`], entry point and global library configuration.
+//! * [`task`], integration with async code.
 //!
 //! The [`prelude`] contains often-imported symbols; feel free to `use godot::prelude::*` in your code.
 //! <br><br>
@@ -68,10 +69,16 @@
 //! * **`api-4-{minor}`**
 //! * **`api-4-{minor}-{patch}`**
 //! * **`api-custom`**
+//! * **`api-custom-json`**
 //!
 //!   Sets the [**API level**](https://godot-rust.github.io/book/toolchain/godot-version.html) to the specified Godot version,
 //!   or a custom-built local binary.
-//!   You can use at most one `api-*` feature. If absent, the current Godot minor version is used, with patch level 0.<br><br>
+//!   You can use at most one `api-*` feature. If absent, the current Godot minor version is used, with patch level 0.
+//!
+//!   `api-custom` feature requires specifying `GODOT4_BIN` environment variable with a path to your Godot4 binary.
+//!
+//!   The `api-custom-json` feature requires specifying `GODOT4_GDEXTENSION_JSON` environment variable with a path
+//!   to your custom-defined `extension_api.json`.<br><br>
 //!
 //! * **`double-precision`**
 //!
@@ -103,14 +110,18 @@
 //!   Support for WebAssembly exports is still a work-in-progress and is not yet well tested. This feature is in place for users
 //!   to explicitly opt in to any instabilities or rough edges that may result.
 //!
-//!   By default, Wasm threads are enabled and require the flag `"-C", "link-args=-sUSE_PTHREADS=1"` in the `wasm32-unknown-unknown` target.
+//!   Please read [Export to Web](https://godot-rust.github.io/book/toolchain/export-web.html) in the book.
+//!
+//!   By default, Wasm threads are enabled and require the flag `"-C", "link-args=-pthread"` in the `wasm32-unknown-unknown` target.
 //!   This must be kept in sync with Godot's Web export settings (threading support enabled). To disable it, use **additionally* the feature
 //!   `experimental-wasm-nothreads`.<br><br>
+//!
+//!   It is recommended to use this feature in combination with `lazy-function-tables` to reduce the size of the generated Wasm binary.
 //!
 //! * **`experimental-wasm-nothreads`**
 //!
 //!   Requires the `experimental-wasm` feature. Disables threading support for WebAssembly exports. This needs to be kept in sync with
-//!   Godot's Web export setting (threading support disabled), and must _not_ use the `"-C", "link-args=-sUSE_PTHREADS=1"` flag in the
+//!   Godot's Web export setting (threading support disabled), and must _not_ use the `"-C", "link-args=-pthread"` flag in the
 //!   `wasm32-unknown-unknown` target.<br><br>
 //!
 //! * **`codegen-rustfmt`**
@@ -143,29 +154,29 @@ pub mod __docs;
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Validations
 
-#[cfg(all(feature = "lazy-function-tables", feature = "experimental-threads"))]
-compile_error!("Thread safety for lazy function pointers is not yet implemented.");
-
-#[cfg(all(
-    feature = "experimental-wasm-nothreads",
-    feature = "experimental-threads"
-))]
-compile_error!("Cannot use 'experimental-threads' with a nothreads Wasm build yet.");
+// Many validations are moved to godot-ffi. #[cfg]s are not emitted in this crate, so move checks for those up to godot-core.
 
 #[cfg(all(target_family = "wasm", not(feature = "experimental-wasm")))]
-compile_error!("Must opt-in using `experimental-wasm` Cargo feature; keep in mind that this is work in progress");
+compile_error!(
+    "Wasm target requires opt-in via `experimental-wasm` Cargo feature;\n\
+    keep in mind that this is work in progress."
+);
 
 // See also https://github.com/godotengine/godot/issues/86346.
-#[cfg(all(feature = "double-precision", not(feature = "api-custom")))]
-compile_error!("The feature `double-precision` currently requires `api-custom` due to incompatibilities in the GDExtension API JSON.");
-
-// Note: #[cfg]s are not emitted in this crate, so move checks for those up to godot-core.
+// Could technically be moved to godot-codegen to reduce time-to-failure slightly, but would scatter validations even more.
+#[cfg(all(
+    feature = "double-precision",
+    not(feature = "api-custom"),
+    not(feature = "api-custom-json")
+))]
+compile_error!("The feature `double-precision` currently requires `api-custom` or `api-custom-json` due to incompatibilities in the GDExtension API JSON. \
+See: https://github.com/godotengine/godot/issues/86346");
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Modules
 
 #[doc(inline)]
-pub use godot_core::{builtin, classes, global, meta, obj, tools};
+pub use godot_core::{builtin, classes, global, meta, obj, task, tools};
 
 #[doc(hidden)]
 pub use godot_core::possibly_docs as docs;
@@ -184,6 +195,7 @@ pub mod init {
 /// Register/export Rust symbols to Godot: classes, methods, enums...
 pub mod register {
     pub use godot_core::registry::property;
+    pub use godot_core::registry::signal::re_export::*;
     pub use godot_macros::{godot_api, godot_dyn, Export, GodotClass, GodotConvert, Var};
 
     #[cfg(feature = "__codegen-full")]

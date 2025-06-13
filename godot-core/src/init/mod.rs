@@ -16,6 +16,9 @@ use crate::out;
 
 pub use sys::GdextBuild;
 
+#[cfg(not(wasm_nothreads))]
+pub use sys::{is_main_thread, main_thread_id};
+
 #[doc(hidden)]
 #[deny(unsafe_op_in_unsafe_fn)]
 pub unsafe fn __gdext_load_library<E: ExtensionLibrary>(
@@ -28,11 +31,7 @@ pub unsafe fn __gdext_load_library<E: ExtensionLibrary>(
         // cause TLS-destructors to run then we have a setting already for how to deal with them. Otherwise, this could cause the default
         // behavior to kick in and disable hot reloading.
         #[cfg(target_os = "linux")]
-        match E::override_hot_reload() {
-            None => sys::linux_reload_workaround::default_set_hot_reload(),
-            Some(true) => sys::linux_reload_workaround::enable_hot_reload(),
-            Some(false) => sys::linux_reload_workaround::disable_hot_reload(),
-        }
+        sys::linux_reload_workaround::default_set_hot_reload();
 
         let tool_only_in_editor = match E::editor_run_behavior() {
             EditorRunBehavior::ToolClassesOnly => true,
@@ -44,6 +43,17 @@ pub unsafe fn __gdext_load_library<E: ExtensionLibrary>(
         // SAFETY: no custom code has run yet + no other thread is accessing global handle.
         unsafe {
             sys::initialize(get_proc_address, library, config);
+        }
+
+        // With experimental-features enabled, we can always print panics to godot_print!
+        #[cfg(feature = "experimental-threads")]
+        crate::private::set_gdext_hook(|| true);
+
+        // Without experimental-features enabled, we can only print panics with godot_print! if the panic occurs on the main (Godot) thread.
+        #[cfg(not(feature = "experimental-threads"))]
+        {
+            let main_thread = std::thread::current().id();
+            crate::private::set_gdext_hook(move || std::thread::current().id() == main_thread);
         }
 
         // Currently no way to express failure; could be exposed to E if necessary.
@@ -65,8 +75,11 @@ pub unsafe fn __gdext_load_library<E: ExtensionLibrary>(
         success as u8
     };
 
-    let ctx = || "error when loading GDExtension library";
-    let is_success = crate::private::handle_panic(ctx, init_code);
+    // Use std::panic::catch_unwind instead of handle_panic: handle_panic uses TLS, which
+    // calls `thread_atexit` on linux, which sets the hot reloading flag on linux.
+    // Using std::panic::catch_unwind avoids this, although we lose out on context information
+    // for debugging.
+    let is_success = std::panic::catch_unwind(init_code);
 
     is_success.unwrap_or(0)
 }
@@ -169,6 +182,9 @@ fn gdext_on_level_deinit(level: InitLevel) {
         // If lowest level is unloaded, call global deinitialization.
         // No business logic by itself, but ensures consistency if re-initialization (hot-reload on Linux) occurs.
 
+        #[cfg(since_api = "4.2")]
+        crate::task::cleanup();
+
         // Garbage-collect various statics.
         // SAFETY: this is the last time meta APIs are used.
         unsafe {
@@ -262,17 +278,45 @@ pub unsafe trait ExtensionLibrary {
         // Nothing by default.
     }
 
-    /// Whether to enable hot reloading of this library. Return `None` to use the default behavior.
+    /// Whether to override the Wasm binary filename used by your GDExtension which the library should expect at runtime. Return `None`
+    /// to use the default where gdext expects either `{YourCrate}.wasm` (default binary name emitted by Rust) or
+    /// `{YourCrate}.threads.wasm` (for builds producing separate single-threaded and multi-threaded binaries).
     ///
-    /// Enabling this will ensure that the library can be hot reloaded. If this is disabled then hot reloading may still work, but there is no
-    /// guarantee. Enabling this may also lead to memory leaks, so it should not be enabled for builds that are intended to be final builds.
+    /// Upon exporting a game to the web, the library has to know at runtime the exact name of the `.wasm` binary file being used to load
+    /// each GDExtension. By default, Rust exports the binary as `cratename.wasm`, so that is the name checked by godot-rust by default.
     ///
-    /// By default, this is enabled for debug builds and disabled for release builds.
+    /// However, if you need to rename that binary, you can make the library aware of the new binary name by returning
+    /// `Some("newname.wasm")` (don't forget to **include the `.wasm` extension**).
     ///
-    /// Note that this is only checked *once* upon initializing the library. Changing this from `true` to `false` will be picked up as the
-    /// library is then fully reloaded upon hot-reloading, however changing it from `false` to `true` is almost certainly not going to work
-    /// unless hot-reloading is already working regardless of this setting.
-    fn override_hot_reload() -> Option<bool> {
+    /// For example, to have two simultaneous versions, one supporting multi-threading and the other not, you could add a suffix to the
+    /// filename of the Wasm binary of the multi-threaded version in your build process. If you choose the suffix `.threads.wasm`,
+    /// you're in luck as godot-rust already accepts this suffix by default, but let's say you want to use a different suffix, such as
+    /// `-with-threads.wasm`. For this, you can have a `"nothreads"` feature which, when absent, should produce a suffixed binary,
+    /// which can be informed to gdext as follows:
+    ///
+    /// ```no_run
+    /// # use godot::init::*;
+    /// struct MyExtension;
+    ///
+    /// #[gdextension]
+    /// unsafe impl ExtensionLibrary for MyExtension {
+    ///     fn override_wasm_binary() -> Option<&'static str> {
+    ///         // Binary name unchanged ("mycrate.wasm") without thread support.
+    ///         #[cfg(feature = "nothreads")]
+    ///         return None;
+    ///
+    ///         // Tell gdext we add a custom suffix to the binary with thread support.
+    ///         // Please note that this is not needed if "mycrate.threads.wasm" is used.
+    ///         // (You could return `None` as well in that particular case.)
+    ///         #[cfg(not(feature = "nothreads"))]
+    ///         Some("mycrate-with-threads.wasm")
+    ///     }
+    /// }
+    /// ```
+    /// Note that simply overriding this method won't change the name of the Wasm binary produced by Rust automatically: you'll still
+    /// have to rename it by yourself in your build process, as well as specify the updated binary name in your `.gdextension` file.
+    /// This is just to ensure gdext is aware of the new name given to the binary, avoiding runtime errors.
+    fn override_wasm_binary() -> Option<&'static str> {
         None
     }
 }

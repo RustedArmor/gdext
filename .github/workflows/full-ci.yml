@@ -85,6 +85,7 @@ jobs:
         RUSTDOCFLAGS: >
           -D rustdoc::broken-intra-doc-links -D rustdoc::private-intra-doc-links -D rustdoc::invalid-codeblock-attributes 
           -D rustdoc::invalid-rust-codeblocks -D rustdoc::invalid-html-tags -D rustdoc::bare-urls -D rustdoc::unescaped-backticks
+          -D warnings
       run: cargo doc -p godot --ignore-rust-version
 
 
@@ -144,7 +145,7 @@ jobs:
 
           - name: linux
             os: ubuntu-22.04
-            rust-toolchain: "1.80"
+            rust-toolchain: "1.87"
             rust-special: -msrv
 
     steps:
@@ -245,7 +246,7 @@ jobs:
             os: macos-13
             artifact-name: macos-x86-nightly
             godot-binary: godot.macos.editor.dev.x86_64
-            with-hot-reload: true
+            hot-reload: stable
 
           - name: macos-double-x86
             os: macos-13
@@ -253,17 +254,17 @@ jobs:
             godot-binary: godot.macos.editor.dev.double.x86_64
             rust-extra-args: --features godot/api-custom,godot/double-precision
 
-          - name: macos-x86-4.2
+          - name: macos-x86-4.3
             os: macos-13
-            artifact-name: macos-x86-4.2
+            artifact-name: macos-x86-4.3
             godot-binary: godot.macos.editor.dev.x86_64
-            godot-prebuilt-patch: '4.2.2'
+            godot-prebuilt-patch: '4.3'
 
           - name: macos-arm
             os: macos-latest
             artifact-name: macos-arm-nightly
             godot-binary: godot.macos.editor.dev.arm64
-            with-hot-reload: true
+            hot-reload: stable
 
            # api-custom on macOS arm64 not working, due to clang linker issues.
 #          - name: macos-double-arm
@@ -272,11 +273,11 @@ jobs:
 #            godot-binary: godot.macos.editor.dev.double.arm64
 #            rust-extra-args: --features godot/api-custom,godot/double-precision
 
-          - name: macos-arm-4.2
+          - name: macos-arm-4.3
             os: macos-latest
-            artifact-name: macos-arm-4.2
+            artifact-name: macos-arm-4.3
             godot-binary: godot.macos.editor.dev.arm64
-            godot-prebuilt-patch: '4.2.2'
+            godot-prebuilt-patch: '4.3'
 
           # Windows
 
@@ -284,7 +285,7 @@ jobs:
             os: windows-latest
             artifact-name: windows-nightly
             godot-binary: godot.windows.editor.dev.x86_64.exe
-            with-hot-reload: true
+            hot-reload: stable
 
           - name: windows-double
             os: windows-latest
@@ -292,11 +293,11 @@ jobs:
             godot-binary: godot.windows.editor.dev.double.x86_64.exe
             rust-extra-args: --features godot/api-custom,godot/double-precision
 
-          - name: windows-4.2
+          - name: windows-4.3
             os: windows-latest
-            artifact-name: windows-4.2
+            artifact-name: windows-4.3
             godot-binary: godot.windows.editor.dev.x86_64.exe
-            godot-prebuilt-patch: '4.2.2'
+            godot-prebuilt-patch: '4.3'
 
 #          - name: windows-4.1
 #            os: windows-latest
@@ -316,7 +317,7 @@ jobs:
             artifact-name: linux-nightly
             godot-binary: godot.linuxbsd.editor.dev.x86_64
             rust-extra-args: --features itest/codegen-full
-            with-hot-reload: true
+            hot-reload: api-custom
 
           # Combines now a lot of features, but should be OK. lazy-function-tables doesn't work with experimental-threads.
           - name: linux-double-lazy
@@ -329,22 +330,42 @@ jobs:
             os: ubuntu-22.04
             artifact-name: linux-nightly
             godot-binary: godot.linuxbsd.editor.dev.x86_64
+            # Important to keep both experimental-threads and codegen-full. Some itests (native_st_audio) require both.
             rust-extra-args: --features itest/experimental-threads,itest/codegen-full-experimental,godot/api-custom,godot/serde,itest/register-docs
+
+          # Compiles godot-rust with `api-custom-json` feature against the JSON file generated via `--dump-extension-api`.
+          # Uses latest 4.x headers, while `extension_api.json` comes from the latest Godot binary.
+          - name: linux-custom-api-json
+            os: ubuntu-22.04
+            artifact-name: linux-nightly
+            godot-binary: godot.linuxbsd.editor.dev.x86_64
+            rust-extra-args: --features godot/api-custom-json
+            godot-indirect-json: true
 
           - name: linux-release
             os: ubuntu-22.04
             artifact-name: linux-release-nightly
             godot-binary: godot.linuxbsd.template_release.x86_64
-            rust-extra-args: --release
+            # Use `codegen-full-experimental` to make sure that all function tables can be loaded in Godot release builds.
+            # If the experimental part causes problems, downgrade to `codegen-full`.
+            rust-extra-args: --release --features itest/codegen-full-experimental
             rust-cache-key: release
 
           # Linux compat (4.1 disabled, already covered by memcheck)
+          # No hot-reload before 4.4, as the Godot project is 4.4+.
+
+          - name: linux-4.4
+            os: ubuntu-22.04
+            artifact-name: linux-4.4
+            godot-binary: godot.linuxbsd.editor.dev.x86_64
+            godot-prebuilt-patch: '4.4'
+            hot-reload: stable
 
           - name: linux-4.3
             os: ubuntu-22.04
             artifact-name: linux-4.3
             godot-binary: godot.linuxbsd.editor.dev.x86_64
-            #godot-prebuilt-patch: '4.3.x'
+            godot-prebuilt-patch: '4.3'
 
           - name: linux-4.2
             os: ubuntu-22.04
@@ -396,35 +417,15 @@ jobs:
           rust-cache-key: ${{ matrix.rust-cache-key }}
           with-llvm: ${{ contains(matrix.name, 'macos') && contains(matrix.rust-extra-args, 'api-custom') }}
           godot-check-header: ${{ matrix.godot-check-header }}
-          
+          godot-indirect-json: ${{ matrix.godot-indirect-json }}
+
       - name: "Build and test hot-reload"
-        if: ${{ matrix.with-hot-reload }}
-        working-directory: examples/hot-reload/godot/test
+        if: ${{ matrix.hot-reload }}
+        working-directory: itest/hot-reload/godot
         # Repeat a few times, our hot reload integration test can sometimes be a bit flaky.
-        run: $RETRY ./run-test.sh
+        # Don't pass in rust-extra-args as environment; they're intended for itest.
+        run: $RETRY ./run-test.sh ${{ matrix.hot-reload }}
         shell: bash
-
-
-  run-examples:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: "Install Rust"
-        uses: ./.github/composite/rust
-
-      # First compile, to fail early in case of compilation errors.
-      - name: "Compile Rust examples (release mode)"
-        run: cargo build --release -p dodge-the-creeps
-
-      - name: "Install Godot"
-        uses: ./.github/composite/godot-install
-        with:
-          artifact-name: godot-linux-4.3
-          godot-binary: godot.linuxbsd.editor.dev.x86_64
-
-      - name: "Run examples for short time"
-        run: ./.github/other/check-example.sh dodge-the-creeps
 
 
   cargo-deny-machete:
@@ -484,7 +485,6 @@ jobs:
       - miri-test
       - proptest
       - godot-itest
-      - run-examples
       - cargo-deny-machete
       - license-guard
 

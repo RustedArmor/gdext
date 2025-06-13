@@ -8,7 +8,8 @@
 // Needed for Clippy to accept #[cfg(all())]
 #![allow(clippy::non_minimal_cfg)]
 
-use crate::framework::itest;
+use crate::framework::{expect_panic, itest};
+use godot::builtin::vslice;
 use godot::classes::ClassDb;
 use godot::prelude::*;
 
@@ -79,7 +80,7 @@ struct GdSelfObj {
 #[godot_api]
 impl GdSelfObj {
     // A signal that will be looped back to update_internal through gdscript.
-    #[signal]
+    #[signal(__no_builder)]
     fn update_internal_signal(new_internal: i32);
 
     #[func]
@@ -198,7 +199,7 @@ impl GdSelfObj {
         // GDScript tries to call update_internal(), there will be a failure due
         // to the double borrow and self.internal_value won't be changed.
         self.base_mut()
-            .emit_signal("update_internal_signal", &[new_internal.to_variant()]);
+            .emit_signal("update_internal_signal", vslice![new_internal]);
         self.internal_value
     }
 
@@ -206,7 +207,7 @@ impl GdSelfObj {
     fn succeed_at_updating_internal_value(mut this: Gd<Self>, new_internal: i32) -> i32 {
         // Since this isn't bound while the signal is emitted, GDScript will succeed at calling
         // update_internal() and self.internal_value will be changed.
-        this.emit_signal("update_internal_signal", &[new_internal.to_variant()]);
+        this.emit_signal("update_internal_signal", vslice![new_internal]);
 
         this.bind().internal_value
     }
@@ -264,7 +265,37 @@ impl IRefCounted for GdSelfObj {
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
+
+// Also tests lack of #[class].
+#[derive(GodotClass)]
+struct InitPanic;
+
+#[godot_api]
+impl IRefCounted for InitPanic {
+    // Panicking constructor.
+    fn init(_base: Base<Self::Base>) -> Self {
+        panic!("InitPanic::init() exploded");
+    }
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
 // Tests
+
+#[itest]
+fn init_panic_is_caught() {
+    expect_panic("default construction propagates panic", || {
+        let _obj = InitPanic::new_gd();
+    });
+}
+
+#[itest]
+fn init_fn_panic_is_caught() {
+    expect_panic("Gd::from_init_fn() propagates panic", || {
+        let _obj = Gd::<InitPanic>::from_init_fn(|_base| panic!("custom init closure exploded"));
+    });
+}
+
+// No test for Gd::from_object(), as that simply moves the existing object without running user code.
 
 #[itest]
 fn cfg_doesnt_interfere_with_valid_method_impls() {

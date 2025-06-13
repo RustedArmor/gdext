@@ -210,9 +210,14 @@ impl<T: GodotClass> RawGd<T> {
     //     self.as_target_mut()
     // }
 
-    pub(crate) fn as_object(&self) -> &classes::Object {
+    pub(crate) fn as_object_ref(&self) -> &classes::Object {
         // SAFETY: Object is always a valid upcast target.
         unsafe { self.as_upcast_ref() }
+    }
+
+    pub(crate) fn as_object_mut(&mut self) -> &mut classes::Object {
+        // SAFETY: Object is always a valid upcast target.
+        unsafe { self.as_upcast_mut() }
     }
 
     /// # Panics
@@ -420,8 +425,19 @@ where
         }
     }
 
-    // TODO: document unsafety in this function, and double check that it actually needs to be unsafe.
-    unsafe fn resolve_instance_ptr(&self) -> sys::GDExtensionClassInstancePtr {
+    /// Retrieves and caches pointer to this class instance if `self.obj` is non-null.
+    /// Returns a null pointer otherwise.
+    ///
+    /// Note: The returned pointer to the GDExtensionClass instance (even when `self.obj` is non-null)
+    /// might still be null when:
+    /// - The class isn't instantiable in the current context.
+    /// - The instance is a placeholder (e.g., non-`tool` classes in the editor).
+    ///
+    /// However, null pointers might also occur in other, undocumented contexts.
+    ///
+    /// # Panics
+    /// In Debug mode, if binding is null.
+    fn resolve_instance_ptr(&self) -> sys::GDExtensionClassInstancePtr {
         if self.is_null() {
             return ptr::null_mut();
         }
@@ -432,16 +448,21 @@ where
         }
 
         let callbacks = crate::storage::nop_instance_callbacks();
-        let token = sys::get_library() as *mut std::ffi::c_void;
-        let binding = interface_fn!(object_get_instance_binding)(self.obj_sys(), token, &callbacks);
 
-        debug_assert!(
-            !binding.is_null(),
-            "Class {} -- null instance; does the class have a Godot creator function?",
-            std::any::type_name::<T>()
-        );
+        // SAFETY: library is already initialized.
+        let token = unsafe { sys::get_library() };
+        let token = token.cast::<std::ffi::c_void>();
 
-        let ptr = binding as sys::GDExtensionClassInstancePtr;
+        // SAFETY: ensured that `self.obj` is non-null and valid.
+        let binding = unsafe {
+            interface_fn!(object_get_instance_binding)(self.obj_sys(), token, &callbacks)
+        };
+
+        let ptr: sys::GDExtensionClassInstancePtr = binding.cast();
+
+        #[cfg(debug_assertions)]
+        crate::classes::ensure_binding_not_null::<T>(ptr);
+
         self.cached_storage_ptr.set(ptr);
         ptr
     }
@@ -461,9 +482,7 @@ where
 {
     // If anything changes here, keep in sync with ObjectArg impl.
 
-    fn variant_type() -> sys::VariantType {
-        sys::VariantType::OBJECT
-    }
+    const VARIANT_TYPE: sys::VariantType = sys::VariantType::OBJECT;
 
     unsafe fn new_from_sys(ptr: sys::GDExtensionConstTypePtr) -> Self {
         Self::from_obj_sys_weak(ptr as sys::GDExtensionObjectPtr)

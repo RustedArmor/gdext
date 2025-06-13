@@ -150,6 +150,7 @@ fn collect_inputs() -> Vec<Input> {
     push!(inputs; PackedStringArray, PackedStringArray, PackedStringArray(), PackedStringArray::new());
     push!(inputs; PackedVector2Array, PackedVector2Array, PackedVector2Array(), PackedVector2Array::new());
     push!(inputs; PackedVector3Array, PackedVector3Array, PackedVector3Array(), PackedVector3Array::new());
+
     // This is being run in a build script at the same time as other build-scripts, so the `rustc-cfg` directives haven't been run for this
     // build-script. This means that `#[cfg(since_api = "4.3")]` wouldn't do anything.
     if godot_bindings::since_api("4.3") {
@@ -214,6 +215,7 @@ fn main() {
         rust: rust_property_tests,
         gdscript: gdscript_property_tests,
     } = generate_property_template(&inputs);
+
     let extras = inputs.iter().map(|input| &input.extra);
 
     let rust_tokens = quote::quote! {
@@ -269,6 +271,15 @@ fn main() {
     rustfmt_if_needed(vec![rust_file]);
 
     godot_bindings::emit_godot_version_cfg();
+
+    // The godot crate has a __codegen-full default feature that enables the godot-codegen/codegen-full feature. When compiling the entire
+    // workspace itest also gets compiled with full codegen due to feature unification. This causes compiler errors since the
+    // itest/codegen-full feature does not automatically get enabled in such a situation.
+    //
+    // By conditionally emitting the feature config we can auto enable the feature for itest as well.
+    if godot_codegen::IS_CODEGEN_FULL {
+        println!("cargo::rustc-cfg=feature=\"codegen-full\"");
+    }
 }
 
 // TODO remove, or remove code duplication with codegen
@@ -456,24 +467,67 @@ fn generate_property_template(inputs: &[Input]) -> PropertyTests {
         }
     }
 
+    // Only available in Godot 4.3+.
+    let rust_exports_4_3 = if godot_bindings::before_api("4.3") {
+        TokenStream::new()
+    } else {
+        quote! {
+            #[export(storage)]
+            export_storage: GString,
+
+            #[export(file)]
+            export_file_array: Array<GString>,
+            #[export(file)]
+            export_file_parray: PackedStringArray,
+
+            #[export(file = "*.txt")]
+            export_file_wildcard_array: Array<GString>,
+            #[export(file = "*.txt")]
+            export_file_wildcard_parray: PackedStringArray,
+
+            #[export(global_file)]
+            export_global_file_array: Array<GString>,
+            #[export(global_file)]
+            export_global_file_parray: PackedStringArray,
+
+            #[export(global_file = "*.png")]
+            export_global_file_wildcard_array: Array<GString>,
+            #[export(global_file = "*.png")]
+            export_global_file_wildcard_parray: PackedStringArray,
+
+            #[export(dir)]
+            export_dir_array: Array<GString>,
+            #[export(dir)]
+            export_dir_parray: PackedStringArray,
+
+            #[export(global_dir)]
+            export_global_dir_array: Array<GString>,
+            #[export(global_dir)]
+            export_global_dir_parray: PackedStringArray,
+        }
+    };
+
     let rust = quote! {
         #[derive(GodotClass)]
         #[class(base = Node, init)]
         pub struct PropertyTestsRust {
             #(#rust,)*
+            #rust_exports_4_3
 
+            // All the @export_file/dir variants, with GString, Array<GString> and PackedStringArray.
             #[export(file)]
             export_file: GString,
             #[export(file = "*.txt")]
-            export_file_wildcard_txt: GString,
+            export_file_wildcard: GString,
             #[export(global_file)]
             export_global_file: GString,
             #[export(global_file = "*.png")]
-            export_global_file_wildcard_png: GString,
+            export_global_file_wildcard: GString,
             #[export(dir)]
             export_dir: GString,
             #[export(global_dir)]
             export_global_dir: GString,
+
             #[export(multiline)]
             export_multiline: GString,
             #[export(range = (0.0, 20.0))]
@@ -513,15 +567,17 @@ fn generate_property_template(inputs: &[Input]) -> PropertyTests {
         }
     };
 
-    let gdscript = format!(
-        r#"
-{}
+    // `extends`, basic `var` and `@export var` declarations
+    let basic_exports = gdscript.join("\n");
+
+    let advanced_exports = r#"
 @export_file var export_file: String
-@export_file("*.txt") var export_file_wildcard_txt: String
+@export_file("*.txt") var export_file_wildcard: String
 @export_global_file var export_global_file: String
-@export_global_file("*.png") var export_global_file_wildcard_png: String
+@export_global_file("*.png") var export_global_file_wildcard: String
 @export_dir var export_dir: String
 @export_global_dir var export_global_dir: String
+
 @export_multiline var export_multiline: String
 @export_range(0, 20) var export_range_float_0_20: float
 @export_range(-10, 20, 0.2) var export_range_float_neg10_20_02: float
@@ -540,9 +596,30 @@ fn generate_property_template(inputs: &[Input]) -> PropertyTests {
 @export_enum("Warrior", "Magician", "Thief") var export_enum_int_warrior_magician_thief: int
 @export_enum("Slow:30", "Average:60", "VeryFast:200") var export_enum_int_slow_30_average_60_very_fast_200: int
 @export_enum("Rebecca", "Mary", "Leah") var export_enum_string_rebecca_mary_leah: String
-"#,
-        gdscript.join("\n")
-    );
+"#;
+
+    // Only available in Godot 4.3+.
+    let advanced_exports_4_3 = r#"
+@export_storage var export_storage: String
+@export_file var export_file_array: Array[String]
+@export_file var export_file_parray: PackedStringArray
+@export_file("*.txt") var export_file_wildcard_array: Array[String]
+@export_file("*.txt") var export_file_wildcard_parray: PackedStringArray
+@export_global_file var export_global_file_array: Array[String]
+@export_global_file var export_global_file_parray: PackedStringArray
+@export_global_file("*.png") var export_global_file_wildcard_array: Array[String]
+@export_global_file("*.png") var export_global_file_wildcard_parray: PackedStringArray
+@export_dir var export_dir_array: Array[String]
+@export_dir var export_dir_parray: PackedStringArray
+@export_global_dir var export_global_dir_array: Array[String]
+@export_global_dir var export_global_dir_parray: PackedStringArray
+    "#;
+
+    let mut gdscript = format!("{basic_exports}\n{advanced_exports}");
+    if godot_bindings::since_api("4.3") {
+        gdscript.push('\n');
+        gdscript.push_str(advanced_exports_4_3);
+    }
 
     PropertyTests { rust, gdscript }
 }
@@ -563,7 +640,7 @@ fn write_gdscript_code(
 
     let ranges = repo_tweak::find_repeated_ranges(&template, "#(", "#)", &[], false);
     for m in ranges {
-        file.write_all(template[last..m.before_start].as_bytes())?;
+        file.write_all(&template.as_bytes()[last..m.before_start])?;
 
         replace_parts(&template[m.start..m.end], inputs, |replacement| {
             file.write_all(replacement.as_bytes())?;
@@ -572,7 +649,7 @@ fn write_gdscript_code(
 
         last = m.after_end;
     }
-    file.write_all(template[last..].as_bytes())?;
+    file.write_all(&template.as_bytes()[last..])?;
 
     Ok(())
 }

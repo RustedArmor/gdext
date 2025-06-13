@@ -7,7 +7,8 @@
 
 use crate::framework::itest;
 use godot::builtin::{
-    array, varray, Array, Callable, GString, NodePath, StringName, Variant, VariantArray, Vector2,
+    array, dict, varray, vslice, Array, Callable, Color, GString, NodePath, StringName, Variant,
+    VariantArray, Vector2,
 };
 use godot::classes::{Node2D, Object, RefCounted};
 use godot::init::GdextBuild;
@@ -98,27 +99,52 @@ fn callable_object_method() {
 }
 
 #[itest]
+#[cfg(since_api = "4.3")]
+fn callable_variant_method() {
+    // Dictionary
+    let dict = dict! { "one": 1, "value": 2 };
+    let dict_get = Callable::from_variant_method(&dict.to_variant(), "get");
+    assert_eq!(dict_get.call(vslice!["one"]), 1.to_variant());
+
+    // GString
+    let string = GString::from("some string").to_variant();
+    let string_md5 = Callable::from_variant_method(&string, "md5_text");
+    assert_eq!(
+        string_md5.call(vslice![]), // use vslice![] as alternative &[] syntax.
+        "5ac749fbeec93607fc28d666be85e73a".to_variant()
+    );
+
+    // Object
+    let obj = CallableTestObj::new_gd().to_variant();
+    let obj_stringify = Callable::from_variant_method(&obj, "stringify_int");
+    assert_eq!(obj_stringify.call(vslice![10]), "10".to_variant());
+
+    // Vector3
+    let vector = Vector2::new(-1.2, 2.5).to_variant();
+    let vector_round = Callable::from_variant_method(&vector, "round");
+    assert_eq!(vector_round.call(&[]), Vector2::new(-1.0, 3.0).to_variant());
+
+    // Color
+    let color = Color::from_rgba8(255, 0, 127, 255).to_variant();
+    let color_to_html = Callable::from_variant_method(&color, "to_html");
+    assert_eq!(color_to_html.call(&[]), "ff007fff".to_variant());
+
+    // Color - invalid method.
+    let color = Color::from_rgba8(255, 0, 127, 255).to_variant();
+    let color_to_html = Callable::from_variant_method(&color, "to_htmI");
+    assert!(!color_to_html.is_valid());
+}
+
+#[itest]
+#[cfg(since_api = "4.4")]
 fn callable_static() {
     let callable = Callable::from_local_static("CallableTestObj", "concat_array");
 
-    // Test current behavior in <4.4 and >=4.4. Although our API explicitly leaves it unspecified, we then notice change in implementation.
-    if cfg!(since_api = "4.4") {
-        assert_eq!(callable.object(), None);
-        assert_eq!(callable.object_id(), None);
-        assert_eq!(callable.method_name(), None);
-        assert!(callable.is_custom());
-        assert!(callable.is_valid());
-    } else {
-        assert!(callable.object().is_some());
-        assert!(callable.object_id().is_some());
-        assert_eq!(callable.method_name(), Some("concat_array".into()));
-        assert_eq!(callable.to_string(), "GDScriptNativeClass::concat_array");
-        assert!(!callable.is_custom());
-
-        // Surprisingly false, but call still works (see test below).
-        // What DOESN'T work is connecting 4.3 static methods to signals via this approach.
-        assert!(!callable.is_valid());
-    }
+    assert_eq!(callable.object(), None);
+    assert_eq!(callable.object_id(), None);
+    assert_eq!(callable.method_name(), None);
+    assert!(callable.is_custom());
+    assert!(callable.is_valid());
 
     assert!(!callable.is_null());
 
@@ -136,6 +162,32 @@ fn callable_static() {
 
     #[cfg(since_api = "4.3")]
     assert_eq!(callable.get_argument_count(), 0); // Consistently doesn't work :)
+}
+
+// Regression test, see https://github.com/godot-rust/gdext/pull/1029.
+#[itest]
+#[cfg(since_api = "4.4")]
+fn callable_static_bind() {
+    let callable = Callable::from_local_static("CallableTestObj", "concat_array");
+    assert!(callable.is_valid());
+
+    // Test varying binds to static callables.
+    // Last 3 of 4 arguments. Within Godot, bound arguments are used in-order AFTER call arguments.
+    let bindv = callable.bindv(&varray![
+        "two",
+        array![&NodePath::from("three/four")],
+        &RefCounted::new_gd(),
+    ]);
+    assert!(bindv.is_valid());
+
+    assert!(!bindv.to_variant().is_nil());
+    let args = varray![1];
+    let bindv_result = bindv.callv(&args);
+
+    assert!(!bindv_result.is_nil());
+
+    let bind_result_data: VariantArray = bindv_result.to();
+    assert_eq!(4, bind_result_data.len());
 }
 
 #[itest]
@@ -168,18 +220,15 @@ fn callable_call() {
     let callable = obj.callable("assign_int");
 
     assert_eq!(obj.bind().value, 0);
-    callable.call(&[10.to_variant()]);
+    callable.call(vslice![10]);
     assert_eq!(obj.bind().value, 10);
 
-    callable.call(&[20.to_variant(), 30.to_variant()]);
+    callable.call(vslice![20, 30]);
     assert_eq!(obj.bind().value, 10);
 
-    assert_eq!(callable.call(&["string".to_variant()]), Variant::nil());
+    assert_eq!(callable.call(vslice!["string"]), Variant::nil());
 
-    assert_eq!(
-        Callable::invalid().call(&[1.to_variant(), 2.to_variant(), 3.to_variant()]),
-        Variant::nil()
-    );
+    assert_eq!(Callable::invalid().call(vslice![1, 2, 3]), Variant::nil());
 }
 
 #[itest]
@@ -207,11 +256,11 @@ fn callable_call_engine() {
     assert_eq!(cb.method_name(), Some(StringName::from("set_position")));
 
     let pos = Vector2::new(5.0, 7.0);
-    cb.call(&[pos.to_variant()]);
+    cb.call(vslice![pos]);
     assert_eq!(obj.get_position(), pos);
 
     let pos = Vector2::new(1.0, 23.0);
-    let bound = cb.bind(&[pos.to_variant()]);
+    let bound = cb.bind(vslice![pos]);
     bound.call(&[]);
     assert_eq!(obj.get_position(), pos);
 
@@ -235,7 +284,7 @@ fn callable_bindv() {
 fn callable_bind() {
     let obj = CallableTestObj::new_gd();
     let callable = obj.callable("stringify_int");
-    let callable_bound = callable.bind(&[10.to_variant()]);
+    let callable_bound = callable.bind(vslice![10]);
 
     assert_eq!(
         callable_bound.call(&[]),
@@ -251,12 +300,7 @@ fn callable_unbind() {
     let callable_unbound = callable.unbind(3);
 
     assert_eq!(
-        callable_unbound.call(&[
-            121.to_variant(),
-            20.to_variant(),
-            30.to_variant(),
-            40.to_variant()
-        ]),
+        callable_unbound.call(vslice![121, 20, 30, 40]),
         121.to_variant().stringify().to_variant()
     );
 }
@@ -275,9 +319,7 @@ fn callable_get_argument_count() {
     let concat_array = obj.callable("concat_array");
     assert_eq!(concat_array.get_argument_count(), 4);
     assert_eq!(
-        concat_array
-            .bind(&[10.to_variant(), "hello".to_variant()])
-            .get_argument_count(),
+        concat_array.bind(vslice![10, "hello"]).get_argument_count(),
         2
     );
 }
@@ -330,8 +372,9 @@ impl CallableRefcountTest {
 #[cfg(since_api = "4.2")]
 pub mod custom_callable {
     use super::*;
-    use crate::framework::{assert_eq_self, quick_thread, ThreadCrosser};
+    use crate::framework::{assert_eq_self, quick_thread, suppress_panic_log, ThreadCrosser};
     use godot::builtin::{Dictionary, RustCallable};
+    use godot::prelude::Signal;
     use godot::sys;
     use godot::sys::GdextBuild;
     use std::fmt;
@@ -531,8 +574,11 @@ pub mod custom_callable {
         assert_eq!(hash_count(&at), 1, "hash for a untouched if b is inserted");
         assert_eq!(hash_count(&bt), 1, "hash needed for b dict key");
 
-        // Introduced in https://github.com/godotengine/godot/pull/96797.
-        let eq = if GdextBuild::since_api("4.4") { 2 } else { 1 };
+        let eq = match GdextBuild::godot_runtime_version_triple() {
+            (4, 1..=3, _) => 1,
+            (4, 4, 0..=1) => 2, // changed in https://github.com/godotengine/godot/pull/96797.
+            _ => 1,             // changed in https://github.com/godotengine/godot/pull/103647.
+        };
 
         assert_eq!(eq_count(&at), eq, "hash collision, eq for a needed");
         assert_eq!(eq_count(&bt), eq, "hash collision, eq for b needed");
@@ -543,7 +589,9 @@ pub mod custom_callable {
         let received = Arc::new(AtomicU32::new(0));
         let received_callable = received.clone();
         let callable = Callable::from_local_fn("test", move |_args| {
-            panic!("TEST: {}", received_callable.fetch_add(1, Ordering::SeqCst))
+            suppress_panic_log(|| {
+                panic!("TEST: {}", received_callable.fetch_add(1, Ordering::SeqCst))
+            })
         });
 
         assert_eq!(Variant::nil(), callable.callv(&varray![]));
@@ -559,6 +607,41 @@ pub mod custom_callable {
         assert_eq!(Variant::nil(), callable.callv(&varray![]));
 
         assert_eq!(1, received.load(Ordering::SeqCst));
+    }
+
+    #[itest]
+    fn callable_is_connected() {
+        let tracker = Tracker::new();
+        let tracker2 = Tracker::new();
+
+        // Adder hash depends on its sum.
+        let some_callable = Callable::from_custom(Adder::new_tracked(3, tracker));
+        let identical_callable = Callable::from_custom(Adder::new_tracked(3, tracker2));
+
+        let obj = RefCounted::new_gd();
+        let signal = Signal::from_object_signal(&obj, "script_changed");
+        signal.connect(&some_callable, 0);
+
+        // Given Custom Callable is connected to signal
+        // if callable with the very same hash is already connected.
+        assert!(signal.is_connected(&some_callable));
+        assert!(signal.is_connected(&identical_callable));
+
+        let change = [2.to_variant()];
+
+        // Change the hash.
+        signal.emit(&change);
+
+        // The hash, dependent on `Adder.sum` has been changed.
+        // `identical_callable` is considered NOT connected.
+        assert!(signal.is_connected(&some_callable));
+        assert!(!signal.is_connected(&identical_callable));
+
+        identical_callable.call(&change);
+
+        // The hashes are, once again, identical.
+        assert!(signal.is_connected(&some_callable));
+        assert!(signal.is_connected(&identical_callable));
     }
 
     // ------------------------------------------------------------------------------------------------------------------------------------------

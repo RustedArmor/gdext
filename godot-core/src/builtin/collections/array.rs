@@ -5,18 +5,19 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use std::fmt;
 use std::marker::PhantomData;
+use std::{cmp, fmt};
 
 use crate::builtin::*;
 use crate::meta;
 use crate::meta::error::{ConvertError, FromGodotError, FromVariantError};
 use crate::meta::{
-    element_godot_type_name, element_variant_type, ArrayElement, ArrayTypeInfo, AsArg, CowArg,
-    FromGodot, GodotConvert, GodotFfiVariant, GodotType, ParamType, PropertyHintInfo, RefArg,
-    ToGodot,
+    element_godot_type_name, element_variant_type, ArrayElement, ArrayTypeInfo, AsArg, ClassName,
+    CowArg, FromGodot, GodotConvert, GodotFfiVariant, GodotType, ParamType, PropertyHintInfo,
+    RefArg, ToGodot,
 };
-use crate::registry::property::{Export, Var};
+use crate::obj::{bounds, Bounds, DynGd, Gd, GodotClass};
+use crate::registry::property::{BuiltinExport, Export, Var};
 use godot_ffi as sys;
 use sys::{ffi_methods, interface_fn, GodotFfi};
 
@@ -272,6 +273,8 @@ impl<T: ArrayElement> Array<T> {
 
     /// Clears the array, removing all elements.
     pub fn clear(&mut self) {
+        self.debug_ensure_mutable();
+
         // SAFETY: No new values are written to the array, we only remove values from the array.
         unsafe { self.as_inner_mut() }.clear();
     }
@@ -282,6 +285,8 @@ impl<T: ArrayElement> Array<T> {
     ///
     /// If `index` is out of bounds.
     pub fn set(&mut self, index: usize, value: impl AsArg<T>) {
+        self.debug_ensure_mutable();
+
         let ptr_mut = self.ptr_mut(index);
 
         meta::arg_into_ref!(value: T);
@@ -297,6 +302,8 @@ impl<T: ArrayElement> Array<T> {
     #[doc(alias = "append")]
     #[doc(alias = "push_back")]
     pub fn push(&mut self, value: impl AsArg<T>) {
+        self.debug_ensure_mutable();
+
         meta::arg_into_ref!(value: T);
 
         // SAFETY: The array has type `T` and we're writing a value of type `T` to it.
@@ -309,6 +316,8 @@ impl<T: ArrayElement> Array<T> {
     /// On large arrays, this method is much slower than [`push()`][Self::push], as it will move all the array's elements.
     /// The larger the array, the slower `push_front()` will be.
     pub fn push_front(&mut self, value: impl AsArg<T>) {
+        self.debug_ensure_mutable();
+
         meta::arg_into_ref!(value: T);
 
         // SAFETY: The array has type `T` and we're writing a value of type `T` to it.
@@ -321,6 +330,8 @@ impl<T: ArrayElement> Array<T> {
     /// _Godot equivalent: `pop_back`_
     #[doc(alias = "pop_back")]
     pub fn pop(&mut self) -> Option<T> {
+        self.debug_ensure_mutable();
+
         (!self.is_empty()).then(|| {
             // SAFETY: We do not write any values to the array, we just remove one.
             let variant = unsafe { self.as_inner_mut() }.pop_back();
@@ -333,6 +344,8 @@ impl<T: ArrayElement> Array<T> {
     /// Note: On large arrays, this method is much slower than `pop()` as it will move all the
     /// array's elements. The larger the array, the slower `pop_front()` will be.
     pub fn pop_front(&mut self) -> Option<T> {
+        self.debug_ensure_mutable();
+
         (!self.is_empty()).then(|| {
             // SAFETY: We do not write any values to the array, we just remove one.
             let variant = unsafe { self.as_inner_mut() }.pop_front();
@@ -348,6 +361,8 @@ impl<T: ArrayElement> Array<T> {
     /// # Panics
     /// If `index > len()`.
     pub fn insert(&mut self, index: usize, value: impl AsArg<T>) {
+        self.debug_ensure_mutable();
+
         let len = self.len();
         assert!(
             index <= len,
@@ -370,6 +385,8 @@ impl<T: ArrayElement> Array<T> {
     /// If `index` is out of bounds.
     #[doc(alias = "pop_at")]
     pub fn remove(&mut self, index: usize) -> T {
+        self.debug_ensure_mutable();
+
         self.check_bounds(index);
 
         // SAFETY: We do not write any values to the array, we just remove one.
@@ -384,6 +401,8 @@ impl<T: ArrayElement> Array<T> {
     /// On large arrays, this method is much slower than [`pop()`][Self::pop], as it will move all the array's
     /// elements after the removed element.
     pub fn erase(&mut self, value: impl AsArg<T>) {
+        self.debug_ensure_mutable();
+
         meta::arg_into_ref!(value: T);
 
         // SAFETY: We don't write anything to the array.
@@ -393,6 +412,8 @@ impl<T: ArrayElement> Array<T> {
     /// Assigns the given value to all elements in the array. This can be used together with
     /// `resize` to create an array with a given size and initialized elements.
     pub fn fill(&mut self, value: impl AsArg<T>) {
+        self.debug_ensure_mutable();
+
         meta::arg_into_ref!(value: T);
 
         // SAFETY: The array has type `T` and we're writing values of type `T` to it.
@@ -406,6 +427,8 @@ impl<T: ArrayElement> Array<T> {
     ///
     /// If you know that the new size is smaller, then consider using [`shrink`](Array::shrink) instead.
     pub fn resize(&mut self, new_size: usize, value: impl AsArg<T>) {
+        self.debug_ensure_mutable();
+
         let original_size = self.len();
 
         // SAFETY: While we do insert `Variant::nil()` if the new size is larger, we then fill it with `value` ensuring that all values in the
@@ -436,6 +459,8 @@ impl<T: ArrayElement> Array<T> {
     /// If you want to increase the size of the array, use [`resize`](Array::resize) instead.
     #[doc(alias = "resize")]
     pub fn shrink(&mut self, new_size: usize) -> bool {
+        self.debug_ensure_mutable();
+
         if new_size >= self.len() {
             return false;
         }
@@ -448,6 +473,8 @@ impl<T: ArrayElement> Array<T> {
 
     /// Appends another array at the end of this array. Equivalent of `append_array` in GDScript.
     pub fn extend_array(&mut self, other: &Array<T>) {
+        self.debug_ensure_mutable();
+
         // SAFETY: `append_array` will only read values from `other`, and all types can be converted to `Variant`.
         let other: &VariantArray = unsafe { other.assume_type_ref::<Variant>() };
 
@@ -612,64 +639,150 @@ impl<T: ArrayElement> Array<T> {
         }
     }
 
-    /// Finds the index of an existing value in a sorted array using binary search.
-    /// Equivalent of `bsearch` in GDScript.
+    /// Finds the index of a value in a sorted array using binary search.
     ///
-    /// If the value is not present in the array, returns the insertion index that
-    /// would maintain sorting order.
+    /// If the value is not present in the array, returns the insertion index that would maintain sorting order.
     ///
-    /// Calling `bsearch` on an unsorted array results in unspecified behavior.
+    /// Calling `bsearch` on an unsorted array results in unspecified behavior. Consider using `sort()` to ensure the sorting
+    /// order is compatible with your callable's ordering.
     pub fn bsearch(&self, value: impl AsArg<T>) -> usize {
         meta::arg_into_ref!(value: T);
 
         to_usize(self.as_inner().bsearch(&value.to_variant(), true))
     }
 
-    /// Finds the index of an existing value in a sorted array using binary search.
-    /// Equivalent of `bsearch_custom` in GDScript.
+    /// Finds the index of a value in a sorted array using binary search, with type-safe custom predicate.
     ///
-    /// Takes a `Callable` and uses the return value of it to perform binary search.
+    /// The comparator function should return an ordering that indicates whether its argument is `Less`, `Equal` or `Greater` the desired value.
+    /// For example, for an ascending-ordered array, a simple predicate searching for a constant value would be `|elem| elem.cmp(&4)`.
+    /// See also [`slice::binary_search_by()`].
     ///
-    /// If the value is not present in the array, returns the insertion index that
-    /// would maintain sorting order.
+    /// If the value is found, returns `Ok(index)` with its index. Otherwise, returns `Err(index)`, where `index` is the insertion index
+    /// that would maintain sorting order.
     ///
-    /// Calling `bsearch_custom` on an unsorted array results in unspecified behavior.
+    /// Calling `bsearch_by` on an unsorted array results in unspecified behavior. Consider using [`sort_by()`] to ensure
+    /// the sorting order is compatible with your callable's ordering.
+    #[cfg(since_api = "4.2")]
+    pub fn bsearch_by<F>(&self, mut func: F) -> Result<usize, usize>
+    where
+        F: FnMut(&T) -> cmp::Ordering + 'static,
+    {
+        // Early exit; later code relies on index 0 being present.
+        if self.is_empty() {
+            return Err(0);
+        }
+
+        // We need one dummy element of type T, because Godot's bsearch_custom() checks types (so Variant::nil() can't be passed).
+        // Optimization: roundtrip Variant -> T -> Variant could be avoided, but anyone needing speed would use Rust binary search...
+        let ignored_value = self.at(0);
+        let ignored_value = <T as ParamType>::owned_to_arg(ignored_value);
+
+        let godot_comparator = |args: &[&Variant]| {
+            let value = T::from_variant(args[0]);
+            let is_less = matches!(func(&value), cmp::Ordering::Less);
+
+            Ok(is_less.to_variant())
+        };
+
+        let debug_name = std::any::type_name::<F>();
+        let index = Callable::with_scoped_fn(debug_name, godot_comparator, |pred| {
+            self.bsearch_custom(ignored_value, pred)
+        });
+
+        if let Some(value_at_index) = self.get(index) {
+            if func(&value_at_index) == cmp::Ordering::Equal {
+                return Ok(index);
+            }
+        }
+
+        Err(index)
+    }
+
+    /// Finds the index of a value in a sorted array using binary search, with `Callable` custom predicate.
     ///
-    /// Consider using `sort_custom()` to ensure the sorting order is compatible with
-    /// your callable's ordering
-    pub fn bsearch_custom(&self, value: impl AsArg<T>, func: &Callable) -> usize {
+    /// The callable `pred` takes two elements `(a, b)` and should return if `a < b` (strictly less).
+    /// For a type-safe version, check out [`bsearch_by()`][Self::bsearch_by].
+    ///
+    /// If the value is not present in the array, returns the insertion index that would maintain sorting order.
+    ///
+    /// Calling `bsearch_custom` on an unsorted array results in unspecified behavior. Consider using `sort_custom()` to ensure
+    /// the sorting order is compatible with your callable's ordering.
+    pub fn bsearch_custom(&self, value: impl AsArg<T>, pred: &Callable) -> usize {
         meta::arg_into_ref!(value: T);
 
         to_usize(
             self.as_inner()
-                .bsearch_custom(&value.to_variant(), func, true),
+                .bsearch_custom(&value.to_variant(), pred, true),
         )
     }
 
     /// Reverses the order of the elements in the array.
     pub fn reverse(&mut self) {
+        self.debug_ensure_mutable();
+
         // SAFETY: We do not write any values that don't already exist in the array, so all values have the correct type.
         unsafe { self.as_inner_mut() }.reverse();
     }
 
     /// Sorts the array.
     ///
-    /// Note: The sorting algorithm used is not [stable](https://en.wikipedia.org/wiki/Sorting_algorithm#Stability).
-    /// This means that values considered equal may have their order changed when using `sort_unstable`.
+    /// The sorting algorithm used is not [stable](https://en.wikipedia.org/wiki/Sorting_algorithm#Stability).
+    /// This means that values considered equal may have their order changed when using `sort_unstable`. For most variant types,
+    /// this distinction should not matter though.
+    ///
+    /// _Godot equivalent: `Array.sort()`_
     #[doc(alias = "sort")]
     pub fn sort_unstable(&mut self) {
+        self.debug_ensure_mutable();
+
         // SAFETY: We do not write any values that don't already exist in the array, so all values have the correct type.
         unsafe { self.as_inner_mut() }.sort();
     }
 
-    /// Sorts the array.
+    /// Sorts the array, using a type-safe comparator.
     ///
-    /// Uses the provided `Callable` to determine ordering.
+    /// The predicate expects two parameters `(a, b)` and should return an ordering relation. For example, simple ascending ordering of the
+    /// elements themselves would be achieved with `|a, b| a.cmp(b)`.
     ///
-    /// Note: The sorting algorithm used is not [stable](https://en.wikipedia.org/wiki/Sorting_algorithm#Stability).
-    /// This means that values considered equal may have their order changed when using `sort_unstable_custom`.
+    /// The sorting algorithm used is not [stable](https://en.wikipedia.org/wiki/Sorting_algorithm#Stability).
+    /// This means that values considered equal may have their order changed when using `sort_unstable_by`. For most variant types,
+    /// this distinction should not matter though.
+    #[cfg(since_api = "4.2")]
+    pub fn sort_unstable_by<F>(&mut self, mut func: F)
+    where
+        F: FnMut(&T, &T) -> cmp::Ordering,
+    {
+        self.debug_ensure_mutable();
+
+        let godot_comparator = |args: &[&Variant]| {
+            let lhs = T::from_variant(args[0]);
+            let rhs = T::from_variant(args[1]);
+            let is_less = matches!(func(&lhs, &rhs), cmp::Ordering::Less);
+
+            Ok(is_less.to_variant())
+        };
+
+        let debug_name = std::any::type_name::<F>();
+        Callable::with_scoped_fn(debug_name, godot_comparator, |pred| {
+            self.sort_unstable_custom(pred)
+        });
+    }
+
+    /// Sorts the array, using type-unsafe `Callable` comparator.
+    ///
+    /// For a type-safe variant of this method, use [`sort_unstable_by()`][Self::sort_unstable_by].
+    ///
+    /// The callable expects two parameters `(lhs, rhs)` and should return a bool `lhs < rhs`.
+    ///
+    /// The sorting algorithm used is not [stable](https://en.wikipedia.org/wiki/Sorting_algorithm#Stability).
+    /// This means that values considered equal may have their order changed when using `sort_unstable_custom`.For most variant types,
+    /// this distinction should not matter though.
+    ///
+    /// _Godot equivalent: `Array.sort_custom()`_
     #[doc(alias = "sort_custom")]
     pub fn sort_unstable_custom(&mut self, func: &Callable) {
+        self.debug_ensure_mutable();
+
         // SAFETY: We do not write any values that don't already exist in the array, so all values have the correct type.
         unsafe { self.as_inner_mut() }.sort_custom(func);
     }
@@ -678,14 +791,58 @@ impl<T: ArrayElement> Array<T> {
     /// global random number generator common to methods such as `randi`. Call `randomize` to
     /// ensure that a new seed will be used each time if you want non-reproducible shuffling.
     pub fn shuffle(&mut self) {
+        self.debug_ensure_mutable();
+
         // SAFETY: We do not write any values that don't already exist in the array, so all values have the correct type.
         unsafe { self.as_inner_mut() }.shuffle();
+    }
+
+    /// Turns the array into a shallow-immutable array.
+    ///
+    /// Makes the array read-only and returns the original array. The array's elements cannot be overridden with different values, and their
+    /// order cannot change. Does not apply to nested elements, such as dictionaries. This operation is irreversible.
+    ///
+    /// In GDScript, arrays are automatically read-only if declared with the `const` keyword.
+    ///
+    /// # Semantics and alternatives
+    /// You can use this in Rust, but the behavior of mutating methods is only validated in a best-effort manner (more than in GDScript though):
+    /// some methods like `set()` panic in Debug mode, when used on a read-only array. There is no guarantee that any attempts to change result
+    /// in feedback; some may silently do nothing.
+    ///
+    /// In Rust, you can use shared references (`&Array<T>`) to prevent mutation. Note however that `Clone` can be used to create another
+    /// reference, through which mutation can still occur. For deep-immutable arrays, you'll need to keep your `Array` encapsulated or directly
+    /// use Rust data structures.
+    ///
+    /// _Godot equivalent: `make_read_only`_
+    #[doc(alias = "make_read_only")]
+    pub fn into_read_only(self) -> Self {
+        // SAFETY: Changes a per-array property, no elements.
+        unsafe { self.as_inner_mut() }.make_read_only();
+        self
+    }
+
+    /// Returns true if the array is read-only.
+    ///
+    /// See [`into_read_only()`][Self::into_read_only].
+    /// In GDScript, arrays are automatically read-only if declared with the `const` keyword.
+    pub fn is_read_only(&self) -> bool {
+        self.as_inner().is_read_only()
+    }
+
+    /// Best-effort mutability check.
+    ///
+    /// # Panics
+    /// In Debug mode, if the array is marked as read-only.
+    fn debug_ensure_mutable(&self) {
+        debug_assert!(
+            !self.is_read_only(),
+            "mutating operation on read-only array"
+        );
     }
 
     /// Asserts that the given index refers to an existing element.
     ///
     /// # Panics
-    ///
     /// If `index` is out of bounds.
     fn check_bounds(&self, index: usize) {
         let len = self.len();
@@ -698,7 +855,6 @@ impl<T: ArrayElement> Array<T> {
     /// Returns a pointer to the element at the given index.
     ///
     /// # Panics
-    ///
     /// If `index` is out of bounds.
     fn ptr(&self, index: usize) -> sys::GDExtensionConstVariantPtr {
         let ptr = self.ptr_or_null(index);
@@ -954,9 +1110,7 @@ impl VariantArray {
 //   Arrays are properly initialized through a `from_sys` call, but the ref-count should be incremented
 //   as that is the callee's responsibility. Which we do by calling `std::mem::forget(array.clone())`.
 unsafe impl<T: ArrayElement> GodotFfi for Array<T> {
-    fn variant_type() -> VariantType {
-        VariantType::ARRAY
-    }
+    const VARIANT_TYPE: VariantType = VariantType::ARRAY;
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque; .. }
 }
@@ -982,6 +1136,10 @@ impl<T: ArrayElement> ParamType for Array<T> {
 
     fn arg_to_ref<'r>(arg: &'r Self::Arg<'_>) -> &'r Self {
         arg.cow_as_ref()
+    }
+
+    fn arg_into_owned(arg: Self::Arg<'_>) -> Self {
+        arg.cow_into_owned()
     }
 }
 
@@ -1099,6 +1257,40 @@ where
     }
 }
 
+impl<T: ArrayElement> BuiltinExport for Array<T> {}
+
+impl<T> Export for Array<Gd<T>>
+where
+    T: GodotClass + Bounds<Exportable = bounds::Yes>,
+{
+    fn export_hint() -> PropertyHintInfo {
+        PropertyHintInfo::export_array_element::<Gd<T>>()
+    }
+
+    #[doc(hidden)]
+    fn as_node_class() -> Option<ClassName> {
+        PropertyHintInfo::object_as_node_class::<T>()
+    }
+}
+
+/// `#[export]` for `Array<DynGd<T, D>>` is available only for `T` being Engine class (such as Node or Resource).
+///
+/// Consider exporting `Array<Gd<T>>` instead of `Array<DynGd<T, D>>` for user-declared GDExtension classes.
+impl<T: GodotClass, D> Export for Array<DynGd<T, D>>
+where
+    T: GodotClass + Bounds<Exportable = bounds::Yes>,
+    D: ?Sized + 'static,
+{
+    fn export_hint() -> PropertyHintInfo {
+        PropertyHintInfo::export_array_element::<DynGd<T, D>>()
+    }
+
+    #[doc(hidden)]
+    fn as_node_class() -> Option<ClassName> {
+        PropertyHintInfo::object_as_node_class::<T>()
+    }
+}
+
 impl<T: ArrayElement> Default for Array<T> {
     #[inline]
     fn default() -> Self {
@@ -1179,9 +1371,9 @@ impl<T: ArrayElement> GodotFfiVariant for Array<T> {
 
     fn ffi_from_variant(variant: &Variant) -> Result<Self, ConvertError> {
         // First check if the variant is an array. The array conversion shouldn't be called otherwise.
-        if variant.get_type() != Self::variant_type() {
+        if variant.get_type() != Self::VARIANT_TYPE {
             return Err(FromVariantError::BadType {
-                expected: Self::variant_type(),
+                expected: Self::VARIANT_TYPE,
                 actual: variant.get_type(),
             }
             .into_error(variant.clone()));
@@ -1387,6 +1579,8 @@ macro_rules! array {
 /// To create a typed `Array` with a single element type, see the [`array!`] macro.
 ///
 /// For dictionaries, a similar macro [`dict!`] exists.
+///
+/// To construct slices of variants, use [`vslice!`].
 #[macro_export]
 macro_rules! varray {
     // Note: use to_variant() and not Variant::from(), as that works with both references and values
@@ -1398,6 +1592,49 @@ macro_rules! varray {
                 array.push(&$elements.to_variant());
             )*
             array
+        }
+    };
+}
+
+/// Constructs a slice of [`Variant`] literals, useful for passing to vararg functions.
+///
+/// Many APIs in Godot have variable-length arguments. GDScript can call such functions by simply passing more arguments, but in Rust,
+/// the parameter type `&[Variant]` is used.
+///
+/// This macro creates a [slice](https://doc.rust-lang.org/std/primitive.slice.html) of `Variant` values.
+///
+/// # Examples
+/// Variable number of arguments:
+/// ```no_run
+/// # use godot::prelude::*;
+/// let slice: &[Variant] = vslice![42, "hello", true];
+///
+/// let concat: GString = godot::global::str(slice);
+/// ```
+/// _(In practice, you might want to use [`godot_str!`][crate::global::godot_str] instead of `str()`.)_
+///
+/// Dynamic function call via reflection. NIL can still be passed inside `vslice!`, just use `Variant::nil()`.
+/// ```no_run
+/// # use godot::prelude::*;
+/// # fn some_object() -> Gd<Object> { unimplemented!() }
+/// let mut obj: Gd<Object> = some_object();
+/// obj.call("some_method", vslice![Vector2i::new(1, 2), Variant::nil()]);
+/// ```
+///
+/// # See also
+/// To create typed and untyped `Array`s, use the [`array!`] and [`varray!`] macros respectively.
+///
+/// For dictionaries, a similar macro [`dict!`] exists.
+#[macro_export]
+macro_rules! vslice {
+    // Note: use to_variant() and not Variant::from(), as that works with both references and values
+    ($($elements:expr),* $(,)?) => {
+        {
+            use $crate::meta::ToGodot as _;
+            let mut array = $crate::builtin::VariantArray::default();
+            &[
+                $( $elements.to_variant(), )*
+            ]
         }
     };
 }

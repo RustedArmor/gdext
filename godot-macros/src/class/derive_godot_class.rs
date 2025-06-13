@@ -5,18 +5,17 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use proc_macro2::{Ident, Punct, TokenStream};
-use quote::{format_ident, quote, quote_spanned};
-
 use crate::class::{
-    make_property_impl, make_virtual_callback, BeforeKind, Field, FieldDefault, FieldExport,
-    FieldVar, Fields, SignatureInfo,
+    make_property_impl, make_virtual_callback, BeforeKind, Field, FieldCond, FieldDefault,
+    FieldExport, FieldVar, Fields, SignatureInfo,
 };
 use crate::util::{
     bail, error, format_funcs_collection_struct, ident, path_ends_with_complex,
     require_api_version, KvParser,
 };
 use crate::{handle_mutually_exclusive_keys, util, ParseResult};
+use proc_macro2::{Ident, Punct, TokenStream};
+use quote::{format_ident, quote, quote_spanned};
 
 pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
     let class = item.as_struct().ok_or_else(|| {
@@ -65,15 +64,15 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
     }
     let base_ty = &struct_cfg.base_ty;
     #[cfg(all(feature = "register-docs", since_api = "4.3"))]
-    let docs = crate::docs::make_definition_docs(
-        base_ty.to_string(),
-        &class.attributes,
-        &fields.all_fields,
-    );
+    let docs =
+        crate::docs::document_struct(base_ty.to_string(), &class.attributes, &fields.all_fields);
     #[cfg(not(all(feature = "register-docs", since_api = "4.3")))]
     let docs = quote! {};
     let base_class = quote! { ::godot::classes::#base_ty };
-    let inherits_macro = format_ident!("unsafe_inherits_transitive_{}", base_ty);
+
+    // Use this name because when typing a non-existent class, users will be met with the following error:
+    //    could not find `inherit_from_OS__ensure_class_exists` in `class_macros`.
+    let inherits_macro_ident = format_ident!("inherit_from_{}__ensure_class_exists", base_ty);
 
     let prv = quote! { ::godot::private };
     let godot_exports_impl = make_property_impl(class_name, &fields);
@@ -123,6 +122,10 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
         }
         InitStrategy::Absent => {
             is_instantiable = false;
+
+            // Workaround for https://github.com/godot-rust/gdext/issues/874 before Godot 4.5.
+            #[cfg(before_api = "4.5")]
+            modifiers.push(quote! { with_generated_no_default::<#class_name> });
         }
     };
     if is_instantiable {
@@ -142,8 +145,14 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
     let funcs_collection_struct_name = format_funcs_collection_struct(class_name);
     let funcs_collection_struct = quote! {
         #[doc(hidden)]
+        #[allow(non_camel_case_types)]
         pub struct #funcs_collection_struct_name {}
     };
+
+    // Note: one limitation is that macros don't work for `impl nested::MyClass` blocks.
+    let visibility_macro = make_visibility_macro(class_name, class.vis_marker.as_ref());
+    let base_field_macro = make_base_field_macro(class_name, fields.base_field.is_some());
+    let deny_manual_init_macro = make_deny_manual_init_macro(class_name, struct_cfg.init_strategy);
 
     Ok(quote! {
         impl ::godot::obj::GodotClass for #class_name {
@@ -174,17 +183,92 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
         #godot_exports_impl
         #user_class_impl
         #init_expecter
+        #visibility_macro
+        #base_field_macro
+        #deny_manual_init_macro
         #( #deprecations )*
         #( #errors )*
 
-        ::godot::sys::plugin_add!(__GODOT_PLUGIN_REGISTRY in #prv; #prv::ClassPlugin::new::<#class_name>(
+        ::godot::sys::plugin_add!(#prv::__GODOT_PLUGIN_REGISTRY; #prv::ClassPlugin::new::<#class_name>(
             #prv::PluginItem::Struct(
                 #prv::Struct::new::<#class_name>(#docs)#(.#modifiers())*
             )
         ));
 
-        #prv::class_macros::#inherits_macro!(#class_name);
+        #prv::class_macros::#inherits_macro_ident!(#class_name);
     })
+}
+
+/// Generates code for a decl-macro, which takes any item and prepends it with the visibility marker of the class.
+///
+/// Used to access the visibility of the class in other proc-macros like `#[godot_api]`.
+fn make_visibility_macro(
+    class_name: &Ident,
+    vis_marker: Option<&venial::VisMarker>,
+) -> TokenStream {
+    let macro_name = util::format_class_visibility_macro(class_name);
+
+    quote! {
+        macro_rules! #macro_name {
+            (
+                $( #[$meta:meta] )*
+                struct $( $tt:tt )+
+            ) => {
+                $( #[$meta] )*
+                #vis_marker struct $( $tt )+
+            };
+
+            // Can be expanded to `fn` etc. if needed.
+        }
+    }
+}
+
+/// Generates code for a decl-macro, which evaluates to nothing if the class has no base field.
+fn make_base_field_macro(class_name: &Ident, has_base_field: bool) -> TokenStream {
+    let macro_name = util::format_class_base_field_macro(class_name);
+
+    if has_base_field {
+        quote! {
+            macro_rules! #macro_name {
+                ( $( $tt:tt )* ) => { $( $tt )* };
+            }
+        }
+    } else {
+        quote! {
+            macro_rules! #macro_name {
+                ( $( $tt:tt )* ) => {};
+            }
+        }
+    }
+}
+
+/// Generates code for a decl-macro that prevents manual `init()` for incompatible init strategies.
+fn make_deny_manual_init_macro(class_name: &Ident, init_strategy: InitStrategy) -> TokenStream {
+    let macro_name = util::format_class_deny_manual_init_macro(class_name);
+
+    let class_attr = match init_strategy {
+        InitStrategy::Absent => "#[class(no_init)]",
+        InitStrategy::Generated => "#[class(init)]",
+        InitStrategy::UserDefined => {
+            // For classes that expect manual init, do nothing.
+            return quote! {
+                macro_rules! #macro_name {
+                    () => {};
+                }
+            };
+        }
+    };
+
+    let error_message =
+        format!("Class `{class_name}` is marked with {class_attr} but provides an init() method.");
+
+    quote! {
+        macro_rules! #macro_name {
+            () => {
+                compile_error!(#error_message);
+            };
+        }
+    }
 }
 
 /// Checks at compile time that a function with the given name exists on `Self`.
@@ -252,6 +336,78 @@ fn make_godot_init_impl(class_name: &Ident, fields: &Fields) -> TokenStream {
     }
 }
 
+fn make_onready_init(all_fields: &[Field]) -> TokenStream {
+    let onready_fields = all_fields
+        .iter()
+        .filter(|&field| field.is_onready)
+        .map(|field| {
+            let field = &field.name;
+            quote! {
+                ::godot::private::auto_init(&mut self.#field, &base);
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if !onready_fields.is_empty() {
+        quote! {
+            {
+                let base = <Self as ::godot::obj::WithBaseField>::to_gd(self).upcast();
+                #( #onready_fields )*
+            }
+        }
+    } else {
+        TokenStream::new()
+    }
+}
+
+fn make_oneditor_panic_inits(class_name: &Ident, all_fields: &[Field]) -> TokenStream {
+    // Despite its name OnEditor shouldn't panic in the editor for tool classes.
+    let is_in_editor = quote! { ::godot::classes::Engine::singleton().is_editor_hint() };
+
+    let are_all_oneditor_fields_valid = quote! { are_all_oneditor_fields_valid };
+
+    // Informs the user which fields haven't been set, instead of panicking on the very first one. Useful for debugging.
+    let on_editor_fields_checks = all_fields
+        .iter()
+        .filter(|&field| field.is_oneditor)
+        .map(|field| {
+            let field = &field.name;
+            let warning_message =
+                format! { "godot-rust: OnEditor field {field} hasn't been initialized."};
+
+            quote! {
+                if this.#field.is_invalid() {
+                    ::godot::global::godot_warn!(#warning_message);
+                    #are_all_oneditor_fields_valid = false;
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if !on_editor_fields_checks.is_empty() {
+        quote! {
+            fn __are_oneditor_fields_initalized(this: &#class_name) -> bool {
+                // Early return for `#[class(tool)]`.
+                if #is_in_editor {
+                    return true;
+                }
+
+                let mut #are_all_oneditor_fields_valid: bool = true;
+
+                #( #on_editor_fields_checks )*
+
+                #are_all_oneditor_fields_valid
+            }
+
+            if !__are_oneditor_fields_initalized(&self) {
+                panic!("OnEditor fields must be properly initialized before ready.")
+            }
+        }
+    } else {
+        TokenStream::new()
+    }
+}
+
 fn make_user_class_impl(
     class_name: &Ident,
     is_tool: bool,
@@ -263,31 +419,13 @@ fn make_user_class_impl(
     #[cfg(not(feature = "codegen-full"))]
     let rpc_registrations = TokenStream::new();
 
-    let onready_inits = {
-        let mut onready_fields = all_fields
-            .iter()
-            .filter(|&field| field.is_onready)
-            .map(|field| {
-                let field = &field.name;
-                quote! {
-                    ::godot::private::auto_init(&mut self.#field, &base);
-                }
-            });
+    let onready_inits = make_onready_init(all_fields);
 
-        if let Some(first) = onready_fields.next() {
-            quote! {
-                {
-                    let base = <Self as godot::obj::WithBaseField>::to_gd(self).upcast();
-                    #first
-                    #( #onready_fields )*
-                }
-            }
-        } else {
-            TokenStream::new()
-        }
-    };
+    let oneditor_panic_inits = make_oneditor_panic_inits(class_name, all_fields);
 
-    let default_virtual_fn = if all_fields.iter().any(|field| field.is_onready) {
+    let run_before_ready = !onready_inits.is_empty() || !oneditor_panic_inits.is_empty();
+
+    let default_virtual_fn = if run_before_ready {
         let tool_check = util::make_virtual_tool_check();
         let signature_info = SignatureInfo::fn_ready();
 
@@ -297,13 +435,15 @@ fn make_user_class_impl(
         // See also __virtual_call() codegen.
         // This doesn't explicitly check if the base class inherits from Node (and thus has `_ready`), but the derive-macro already does
         // this for the `OnReady` field declaration.
-        let (hash_param, hash_check);
+        let (hash_param, matches_ready_hash);
         if cfg!(since_api = "4.4") {
             hash_param = quote! { hash: u32, };
-            hash_check = quote! { && hash == ::godot::sys::known_virtual_hashes::Node::ready };
+            matches_ready_hash = quote! {
+                (name, hash) == ::godot::sys::godot_virtual_consts::Node::ready
+            };
         } else {
             hash_param = TokenStream::new();
-            hash_check = TokenStream::new();
+            matches_ready_hash = quote! { name == "_ready" }
         }
 
         let default_virtual_fn = quote! {
@@ -314,7 +454,7 @@ fn make_user_class_impl(
                 use ::godot::obj::UserClass as _;
                 #tool_check
 
-                if name == "_ready" #hash_check {
+                if #matches_ready_hash {
                     #callback
                 } else {
                     None
@@ -328,13 +468,16 @@ fn make_user_class_impl(
 
     let user_class_impl = quote! {
         impl ::godot::obj::UserClass for #class_name {
+            #[doc(hidden)]
             fn __config() -> ::godot::private::ClassConfig {
                 ::godot::private::ClassConfig {
                     is_tool: #is_tool,
                 }
             }
 
+            #[doc(hidden)]
             fn __before_ready(&mut self) {
+                #oneditor_panic_inits
                 #rpc_registrations
                 #onready_inits
             }
@@ -460,6 +603,11 @@ fn parse_fields(
             field.is_onready = true;
         }
 
+        // OnEditor<T> type inference
+        if path_ends_with_complex(&field.ty, "OnEditor") {
+            field.is_oneditor = true;
+        }
+
         // #[init]
         if let Some(mut parser) = KvParser::parse(&named_field.attributes, "init")? {
             // #[init] on fields is useless if there is no generated constructor.
@@ -470,7 +618,7 @@ fn parse_fields(
                 );
             }
 
-            // #[init(val = expr)]
+            // #[init(val = EXPR)]
             if let Some(default) = parser.handle_expr("val")? {
                 field.default_val = Some(FieldDefault {
                     default_val: default,
@@ -495,41 +643,34 @@ fn parse_fields(
                 })
             }
 
-            // #[init(node = "NodePath")]
+            // #[init(node = "PATH")]
             if let Some(node_path) = parser.handle_expr("node")? {
-                let mut is_well_formed = true;
-                if !field.is_onready {
-                    is_well_formed = false;
-                    errors.push(error!(
-                        parser.span(),
-                        "The key `node` in attribute #[init] requires field of type `OnReady<T>`\n\
-				         Help: The syntax #[init(node = \"NodePath\")] is equivalent to \
-				         #[init(val = OnReady::node(\"NodePath\"))], \
-				         which can only be assigned to fields of type `OnReady<T>`"
-                    ));
-                }
+                field.set_default_val_if(
+                    || quote! { OnReady::from_node(#node_path) },
+                    FieldCond::IsOnReady,
+                    &parser,
+                    &mut errors,
+                );
+            }
 
-                if field.default_val.is_some() {
-                    is_well_formed = false;
-                    errors.push(error!(
-				        parser.span(),
-				        "The key `node` in attribute #[init] is mutually exclusive with the keys `default` and `val`\n\
-				         Help: The syntax #[init(node = \"NodePath\")] is equivalent to \
-				         #[init(val = OnReady::node(\"NodePath\"))], \
-				         both aren't allowed since they would override each other"
-			        ));
-                }
+            // #[init(load = "PATH")]
+            if let Some(resource_path) = parser.handle_expr("load")? {
+                field.set_default_val_if(
+                    || quote! { OnReady::from_loaded(#resource_path) },
+                    FieldCond::IsOnReady,
+                    &parser,
+                    &mut errors,
+                );
+            }
 
-                let default_val = if is_well_formed {
-                    quote! { OnReady::node(#node_path) }
-                } else {
-                    quote! { todo!() }
-                };
-
-                field.default_val = Some(FieldDefault {
-                    default_val,
-                    span: parser.span(),
-                });
+            // #[init(sentinel = EXPR)]
+            if let Some(sentinel_value) = parser.handle_expr("sentinel")? {
+                field.set_default_val_if(
+                    || quote! { OnEditor::from_sentinel(#sentinel_value) },
+                    FieldCond::IsOnEditor,
+                    &parser,
+                    &mut errors,
+                );
             }
 
             parser.finish()?;
@@ -558,6 +699,9 @@ fn parse_fields(
             if let Some(override_onready) = handle_opposite_keys(&mut parser, "onready", "hint")? {
                 field.is_onready = override_onready;
             }
+
+            // Not yet implemented for OnEditor.
+
             parser.finish()?;
         }
 

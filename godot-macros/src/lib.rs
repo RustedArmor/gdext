@@ -15,6 +15,7 @@ mod class;
 mod derive;
 #[cfg(all(feature = "register-docs", since_api = "4.3"))]
 mod docs;
+mod ffi_macros;
 mod gdextension;
 mod itest;
 mod util;
@@ -34,20 +35,7 @@ use crate::util::{bail, ident, KvParser};
 ///
 /// See also [book chapter _Registering classes_](https://godot-rust.github.io/book/register/classes.html).
 ///
-/// **Table of contents:**
-/// - [Construction](#construction)
-/// - [Inheritance](#inheritance)
-/// - [Properties and exports](#properties-and-exports)
-///    - [Property registration](#property-registration)
-///    - [Property exports](#property-exports)
-/// - [Signals](#signals)
-/// - [Further class customization](#further-class-customization)
-///    - [Running code in the editor](#running-code-in-the-editor)
-///    - [Editor plugins](#editor-plugins)
-///    - [Class renaming](#class-renaming)
-///    - [Class hiding](#class-hiding)
-/// - [Further field customization](#further-field-customization)
-///    - [Fine-grained inference hints](#fine-grained-inference-hints)
+/// **See sidebar on the left for table of contents.**
 ///
 ///
 /// # Construction
@@ -151,9 +139,9 @@ use crate::util::{bail, ident, KvParser};
 /// (fields annotated with `@export`). In the gdext API, these two concepts are represented with `#[var]` and `#[export]` attributes respectively,
 /// which in turn are backed by the [`Var`](../register/property/trait.Var.html) and [`Export`](../register/property/trait.Export.html) traits.
 ///
-/// ## Property registration
+/// ## Register properties -- `#[var]`
 ///
-/// To create a property, you can use the `#[var]` annotation:
+/// To create a property, you can use the `#[var]` annotation, which supports types implementing [`Var`](../register/property/trait.Var.html).
 ///
 /// ```
 /// # use godot::prelude::*;
@@ -219,9 +207,10 @@ use crate::util::{bail, ident, KvParser};
 /// }
 /// ```
 ///
-/// ## Property exports
+/// ## Export properties -- `#[export]`
 ///
-/// For exporting properties to the editor, you can use the `#[export]` attribute:
+/// To export properties to the editor, you can use the `#[export]` attribute, which supports types implementing
+/// [`Export`](../register/property/trait.Export.html):
 ///
 /// ```
 /// # use godot::prelude::*;
@@ -233,19 +222,21 @@ use crate::util::{bail, ident, KvParser};
 /// }
 /// ```
 ///
-/// If you don't also include a `#[var]` attribute, then a default one will be generated.
-/// `#[export]` also supports all of GDScript's annotations, in a slightly different format. The format is
+/// If you don't include an additional `#[var]` attribute, then a default one will be generated.
+///
+/// `#[export]` also supports all of [GDScript's annotations][gdscript-annotations], in a slightly different format. The format is
 /// translated from an annotation by following these four rules:
 ///
-/// - `@export` becomes `#[export]`
-/// - `@export_{name}` becomes `#[export(name)]`
-/// - `@export_{name}(elem1, ...)` becomes `#[export(name = (elem1, ...))]`
-/// - `@export_{flags/enum}("elem1", "elem2:key2", ...)`
-///   becomes
-///   `#[export(flags/enum = (elem1, elem2 = key2, ...))]`
+/// [gdscript-annotations]: https://docs.godotengine.org/en/stable/tutorials/scripting/gdscript/gdscript_exports.html
 ///
+/// | GDScript annotation                         | Rust attribute                                 |
+/// |---------------------------------------------|-------------------------------------------------|
+/// | `@export`                                   | `#[export]`                                     |
+/// | `@export_key`                               | `#[export(key)]`                                |
+/// | `@export_key(elem1, ...)`                   | `#[export(key = (elem1, ...))]`                 |
+/// | `@export_flags("elem1", "elem2:val2", ...)`<br>`@export_enum("elem1", "elem2:val2", ...)` | `#[export(flags = (elem1, elem2 = val2, ...))]`<br>`#[export(enum = (elem1, elem2 = val2, ...))]` |
 ///
-/// As an example of some different export attributes:
+/// As an example of different export attributes:
 ///
 /// ```
 /// # use godot::prelude::*;
@@ -255,7 +246,11 @@ use crate::util::{bail, ident, KvParser};
 ///     // @export
 ///     #[export]
 ///     float: f64,
-///     
+///
+///     // @export_storage
+///     #[export(storage)]
+///     hidden_string: GString,
+///
 ///     // @export_range(0.0, 10.0, or_greater)
 ///     #[export(range = (0.0, 10.0, or_greater))]
 ///     range_f64: f64,
@@ -287,9 +282,8 @@ use crate::util::{bail, ident, KvParser};
 ///
 /// ```
 ///
-/// Most values in expressions like `key = value`, can be an arbitrary expression that evaluates to the
-/// right value. Meaning you can use constants or variables, as well as any other rust syntax you'd like in
-/// the export attributes.
+/// Most values in syntax such as `key = value` can be arbitrary expressions. For example, you can use constants, function calls or
+/// other Rust expressions that are valid in that context.
 ///
 /// ```
 /// # use godot::prelude::*;
@@ -306,18 +300,24 @@ use crate::util::{bail, ident, KvParser};
 /// }
 /// ```
 ///
-/// You can specify custom property hints, hint strings, and usage flags in a `#[var]` attribute using the
-/// `hint`, `hint_string`, and `usage_flags` keys in the attribute. These are constants in the `PropertyHint`
-/// and `PropertyUsageFlags` enums, respectively.
+/// ## Low-level property hints and usage
 ///
-/// ```
+/// You can specify custom property hints, hint strings, and usage flags in a `#[var]` attribute using the `hint`, `hint_string`
+/// and `usage_flags` keys in the attribute. Hint and usage flags are constants in the [`PropertyHint`] and [`PropertyUsageFlags`] enums,
+/// while hint strings are dependent on the hint, property type and context. Using these low-level keys is rarely necessary, as most common
+/// combinations are covered by `#[var]` and `#[export]` already.
+///
+/// [`PropertyHint`]: ../global/struct.PropertyHint.html
+/// [`PropertyUsageFlags`]: ../global/struct.PropertyUsageFlags.html
+///
+/// ```no_run
 /// # use godot::prelude::*;
 /// #[derive(GodotClass)]
 /// # #[class(init)]
 /// struct MyStruct {
-///     // Treated as an enum with two values: "One" and "Two"
-///     // Displayed in the editor
-///     // Treated as read-only by the editor
+///     // Treated as an enum with two values: "One" and "Two",
+///     // displayed in the editor,
+///     // treated as read-only by the editor.
 ///     #[var(
 ///         hint = ENUM,
 ///         hint_string = "One,Two",
@@ -327,30 +327,10 @@ use crate::util::{bail, ident, KvParser};
 /// }
 /// ```
 ///
-/// # Signals
-///
-/// The `#[signal]` attribute is quite limited at the moment. The functions it decorates (the signals) can accept parameters.
-/// It will be fundamentally reworked.
-///
-/// ```no_run
-/// # use godot::prelude::*;
-/// #[derive(GodotClass)]
-/// # #[class(init)]
-/// struct MyClass {}
-///
-/// #[godot_api]
-/// impl MyClass {
-///     #[signal]
-///     fn some_signal();
-///
-///     #[signal]
-///     fn some_signal_with_parameters(my_parameter: Gd<Node>);
-/// }
-/// ```
 ///
 /// # Further class customization
 ///
-/// ## Running code in the editor
+/// ## Running code in the editor (tool)
 ///
 /// If you annotate a class with `#[class(tool)]`, its lifecycle methods (`ready()`, `process()` etc.) will be invoked in the editor. This
 /// is useful for writing custom editor plugins, as opposed to classes running simply in-game.
@@ -358,7 +338,9 @@ use crate::util::{bail, ident, KvParser};
 /// See [`ExtensionLibrary::editor_run_behavior()`](../init/trait.ExtensionLibrary.html#method.editor_run_behavior)
 /// for more information and further customization.
 ///
-/// This is very similar to [GDScript's `@tool` feature](https://docs.godotengine.org/en/stable/tutorials/plugins/running_code_in_the_editor.html).
+/// This behaves similarly to [GDScript's `@tool` feature](https://docs.godotengine.org/en/stable/tutorials/plugins/running_code_in_the_editor.html).
+///
+/// **Note**: As in GDScript, the class must be marked as a `tool` to be accessible in the editor (e.g., for use by editor plugins and inspectors).
 ///
 /// ## Editor plugins
 ///
@@ -447,10 +429,10 @@ use crate::util::{bail, ident, KvParser};
 /// # }
 /// ```
 ///
+/// # Documentation
+///
 /// <div class="stab portability">Available on <strong>crate feature <code>register-docs</code></strong> only.</div>
 /// <div class="stab portability">Available on <strong>Godot version <code>4.3+</code></strong> only.</div>
-///
-/// # Documentation
 ///
 /// You can document your functions, classes, members, and signals with the `///` doc comment syntax.
 ///
@@ -462,6 +444,11 @@ use crate::util::{bail, ident, KvParser};
 /// struct DocumentedStruct {
 ///     /// This is a class member.
 ///     /// You can use markdown formatting such as _italics_.
+///     ///
+///     /// @experimental `@experimental` and `@deprecated` attributes are supported.
+///     /// The description for such attribute spans for the whole annotated paragraph.
+///     ///
+///     /// This is the rest of a doc description.
 ///     #[var]
 ///     item: f32,
 /// }
@@ -520,17 +507,7 @@ pub fn derive_godot_class(input: TokenStream) -> TokenStream {
 ///
 /// See also [book chapter _Registering functions_](https://godot-rust.github.io/book/register/functions.html) and following.
 ///
-/// **Table of contents**
-/// - [Constructors](#constructors)
-///   - [User-defined `init`](#user-defined-init)
-///   - [Generated `init`](#generated-init)
-/// - [Lifecycle functions](#lifecycle-functions)
-/// - [User-defined functions](#user-defined-functions)
-///   - [Associated functions and methods](#associated-functions-and-methods)
-///   - [Virtual methods](#virtual-methods)
-///   - [RPC attributes](#rpc-attributes)
-/// - [Constants and signals](#signals)
-/// - [Multiple inherent `impl` blocks](#multiple-inherent-impl-blocks)
+/// **See sidebar on the left for table of contents.**
 ///
 /// # Constructors
 ///
@@ -770,7 +747,37 @@ pub fn derive_godot_class(input: TokenStream) -> TokenStream {
 /// [`TransferMode`]: ../classes/multiplayer_peer/struct.TransferMode.html
 /// [`RpcConfig`]: ../register/struct.RpcConfig.html
 ///
-/// # Constants and signals
+///
+/// # Signals
+///
+/// The `#[signal]` attribute declares a Godot signal, which can accept parameters, but not return any value.
+/// The procedural macro generates a type-safe API that allows you to connect and emit the signal from Rust.
+///
+/// ```no_run
+/// # use godot::prelude::*;
+/// #[derive(GodotClass)]
+/// #[class(init)]
+/// struct MyClass {
+///     base: Base<RefCounted>, // necessary for #[signal].
+/// }
+///
+/// #[godot_api]
+/// impl MyClass {
+///     #[signal]
+///     fn some_signal(my_parameter: Gd<Node>);
+/// }
+/// ```
+///
+/// The above implements the [`WithSignals`] trait for `MyClass`, which provides the `signals()` method. Through that
+/// method, you can access all declared signals in `self.signals().some_signal()` or `gd.signals().some_signal()`. The returned object is
+/// of type [`TypedSignal`], which provides further APIs for emitting and connecting, among others.
+///
+/// A detailed explanation with examples is available in the [book chapter _Registering signals_](https://godot-rust.github.io/book/register/signals.html).
+///
+/// [`WithSignals`]: ../obj/trait.WithSignals.html
+/// [`TypedSignal`]: ../register/struct.TypedSignal.html
+///
+/// # Constants
 ///
 /// Please refer to [the book](https://godot-rust.github.io/book/register/constants.html).
 ///
@@ -1038,9 +1045,21 @@ pub fn gdextension(meta: TokenStream, input: TokenStream) -> TokenStream {
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
+// Used by godot-ffi
+
+/// Creates an initialization block for Wasm.
+#[proc_macro]
+#[cfg(feature = "experimental-wasm")]
+pub fn wasm_declare_init_fn(input: TokenStream) -> TokenStream {
+    translate_functional(input, ffi_macros::wasm_declare_init_fn)
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+// Implementation
 
 type ParseResult<T> = Result<T, venial::Error>;
 
+/// For `#[derive(...)]` derive macros.
 fn translate<F>(input: TokenStream, transform: F) -> TokenStream
 where
     F: FnOnce(venial::Item) -> ParseResult<TokenStream2>,
@@ -1054,6 +1073,7 @@ where
     TokenStream::from(result2)
 }
 
+/// For `#[proc_macro_attribute]` procedural macros.
 fn translate_meta<F>(
     self_name: &str,
     meta: TokenStream,
@@ -1070,6 +1090,18 @@ where
     let result2 = util::venial_parse_meta(&meta2, self_name, &input2)
         .and_then(transform)
         .unwrap_or_else(|e| e.to_compile_error());
+
+    TokenStream::from(result2)
+}
+
+/// For `#[proc_macro]` function-style macros.
+#[cfg(feature = "experimental-wasm")]
+fn translate_functional<F>(input: TokenStream, transform: F) -> TokenStream
+where
+    F: FnOnce(TokenStream2) -> ParseResult<TokenStream2>,
+{
+    let input2 = TokenStream2::from(input);
+    let result2 = transform(input2).unwrap_or_else(|e| e.to_compile_error());
 
     TokenStream::from(result2)
 }

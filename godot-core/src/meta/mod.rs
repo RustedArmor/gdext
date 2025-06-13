@@ -48,10 +48,13 @@ mod array_type_info;
 mod class_name;
 mod godot_convert;
 mod method_info;
+mod param_tuple;
 mod property_info;
-mod sealed;
 mod signature;
 mod traits;
+mod uniform_object_deref;
+
+pub(crate) mod sealed;
 
 pub mod error;
 pub mod property_update;
@@ -59,8 +62,10 @@ pub mod property_update;
 pub use args::*;
 pub use class_name::ClassName;
 pub use godot_convert::{FromGodot, GodotConvert, ToGodot};
+pub use param_tuple::{InParamTuple, OutParamTuple, ParamTuple};
 pub use property_update::PropertyUpdate;
 pub use traits::{ArrayElement, GodotType, PackedArrayElement};
+pub use uniform_object_deref::UniformObjectDeref;
 
 pub(crate) use array_type_info::ArrayTypeInfo;
 pub(crate) use traits::{
@@ -70,9 +75,10 @@ pub(crate) use traits::{
 use crate::registry::method::MethodParamOrReturnInfo;
 
 pub(crate) use crate::{
-    arg_into_owned, arg_into_ref, declare_arg_method, impl_asarg_by_ref, impl_asarg_by_value,
-    impl_godot_as_self,
+    arg_into_ref, declare_arg_method, impl_asarg_by_ref, impl_asarg_by_value, impl_godot_as_self,
 };
+// Public due to signals emit() needing it. Should be made pub(crate) again if that changes.
+pub use crate::arg_into_owned;
 
 #[doc(hidden)]
 pub use signature::*;

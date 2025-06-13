@@ -38,6 +38,7 @@ mod string {
     mod gstring_test;
     mod node_path_test;
     mod string_name_test;
+    mod string_test_macros;
 }
 
 mod script {
@@ -47,6 +48,8 @@ mod script {
 mod color_test;
 
 mod convert_test;
+
+mod common;
 
 #[cfg(feature = "serde")]
 mod serde_test;

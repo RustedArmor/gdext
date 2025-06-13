@@ -53,10 +53,17 @@ pub fn make_property_impl(class_name: &Ident, fields: &Fields) -> TokenStream {
 
         // Ensure we add a var if the user only provided a `#[export]`.
         let var = match (export, var) {
-            (Some(_), None) => Some(FieldVar {
-                usage_flags: UsageFlags::InferredExport,
-                ..Default::default()
-            }),
+            (Some(export), None) => {
+                let usage_flags = if let Some(usage) = export.to_export_usage() {
+                    UsageFlags::Custom(vec![usage])
+                } else {
+                    UsageFlags::InferredExport
+                };
+                Some(FieldVar {
+                    usage_flags,
+                    ..Default::default()
+                })
+            }
 
             (_, var) => var.clone(),
         };
@@ -159,7 +166,9 @@ pub fn make_property_impl(class_name: &Ident, fields: &Fields) -> TokenStream {
         );
 
         export_tokens.push(quote! {
-            ::godot::register::private::#registration_fn::<#class_name, #field_type>(
+            // This type may be reused in #hint, in case of generic functions.
+            type FieldType = #field_type;
+            ::godot::register::private::#registration_fn::<#class_name, FieldType>(
                 #field_name,
                 #getter_tokens,
                 #setter_tokens,

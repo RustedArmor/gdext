@@ -4,6 +4,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
+
 use crate::framework::{expect_panic, itest};
 // Test that all important dyn-related symbols are in the prelude.
 use godot::prelude::*;
@@ -56,11 +57,11 @@ fn dyn_gd_creation_deref() {
 
 #[itest]
 fn dyn_gd_creation_deref_multiple_traits() {
-    let obj = foreign::NodeHealth::new_alloc();
-    let original_id = obj.instance_id();
+    let original_obj = foreign::NodeHealth::new_alloc();
+    let original_id = original_obj.instance_id();
 
-    // `dyn Health` must be explicitly declared if multiple AsDyn<...> trait implementations exist.
-    let mut obj = obj.into_dyn::<dyn Health>();
+    // Type can be inferred because `Health` explicitly declares a 'static bound.
+    let mut obj = original_obj.clone().into_dyn();
 
     let dyn_id = obj.instance_id();
     assert_eq!(dyn_id, original_id);
@@ -68,11 +69,33 @@ fn dyn_gd_creation_deref_multiple_traits() {
     deal_20_damage(&mut *obj.dyn_bind_mut());
     assert_eq!(obj.dyn_bind().get_hitpoints(), 80);
 
+    // Otherwise type inference doesn't work and type must be explicitly declared.
+    let mut obj = original_obj
+        .clone()
+        .into_dyn::<dyn InstanceIdProvider<Id = InstanceId>>();
+    assert_eq!(get_instance_id(&mut *obj.dyn_bind_mut()), original_id);
+
+    // Not recommended – for presentational purposes only.
+    // Works because 'static bound on type is enforced in function signature.
+    // I.e. this wouldn't work with fn get_instance_id(...).
+    let mut obj = original_obj.into_dyn();
+    get_instance_id_explicit_static_bound(&mut *obj.dyn_bind_mut());
+
     obj.free();
 }
 
 fn deal_20_damage(h: &mut dyn Health) {
     h.deal_damage(20);
+}
+
+fn get_instance_id(i: &mut dyn InstanceIdProvider<Id = InstanceId>) -> InstanceId {
+    i.get_id_dynamic()
+}
+
+fn get_instance_id_explicit_static_bound(
+    i: &mut (dyn InstanceIdProvider<Id = InstanceId> + 'static),
+) -> InstanceId {
+    i.get_id_dynamic()
 }
 
 #[itest]
@@ -324,12 +347,19 @@ fn dyn_gd_store_in_godot_array() {
     let a = Gd::from_object(RefcHealth { hp: 33 }).into_dyn();
     let b = foreign::NodeHealth::new_alloc().into_dyn();
 
+    // Forward compat: .upcast() here becomes a breaking change if we generalize AsArg to include derived->base conversions.
     let array: Array<DynGd<Object, _>> = array![&a.upcast(), &b.upcast()];
 
     assert_eq!(array.at(0).dyn_bind().get_hitpoints(), 33);
     assert_eq!(array.at(1).dyn_bind().get_hitpoints(), 100);
 
     array.at(1).free();
+
+    // Tests also type inference of array![]. Independent variable c.
+    let c: DynGd<RefcHealth, dyn Health> = Gd::from_object(RefcHealth { hp: 33 }).into_dyn();
+    let c = c.upcast::<RefCounted>();
+    let array_inferred /*: Array<DynGd<RefCounted, _>>*/ = array![&c];
+    assert_eq!(array_inferred.at(0).dyn_bind().get_hitpoints(), 33);
 }
 
 #[itest]
@@ -428,7 +458,8 @@ fn dyn_gd_multiple_traits() {
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Example symbols
 
-trait Health {
+// 'static bound must be explicitly declared to make type inference work.
+trait Health: 'static {
     fn get_hitpoints(&self) -> u8;
 
     fn deal_damage(&mut self, damage: u8);
@@ -507,23 +538,37 @@ impl InstanceIdProvider for foreign::NodeHealth {
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
-// Check if DynGd can be properly exported
+// Checks if DynGd can be properly used as a `#[var]`.
+// All classes can be used as a `#[var]` for `DynGd<T, D>`.
 
 #[derive(GodotClass)]
 #[class(init)]
-struct RefcDynGdExporter {
+struct RefcDynGdVarDeclarer {
     #[var]
     first: Option<DynGd<Object, dyn Health>>,
-    #[export]
+    #[var]
     second: Option<DynGd<foreign::NodeHealth, dyn InstanceIdProvider<Id = InstanceId>>>,
 }
 
 // Implementation created only to register the DynGd `HealthWithAssociatedType<HealthType=f32>` trait.
 // Pointless trait, but tests proper conversion.
 #[godot_dyn]
-impl InstanceIdProvider for RefcDynGdExporter {
+impl InstanceIdProvider for RefcDynGdVarDeclarer {
     type Id = f32;
     fn get_id_dynamic(&self) -> Self::Id {
         42.0
     }
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+// Checks if `#[export]`s for DynGd can be properly auto-generated.
+// Only built-in classes can be used as an `#[export]` for `DynGd<T, D>`.
+
+#[derive(GodotClass)]
+#[class(init, base=Node)]
+struct DynGdExporter {
+    #[export]
+    first: Option<DynGd<Resource, dyn Health>>,
+    #[export]
+    second: OnEditor<DynGd<Resource, dyn Health>>,
 }

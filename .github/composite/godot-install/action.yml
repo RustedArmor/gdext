@@ -41,17 +41,17 @@ runs:
       env:
         ARTIFACT_NAME: ${{ inputs.artifact-name }}
 #      if: steps.cache-godot.outputs.cache-hit != 'true'
-      # If a specific Godot revision should be used, rather than latest, use this:
-      # curl https://nightly.link/Bromeon/godot4-nightly/actions/runs/4910907653/${{ inputs.artifact-name }}.zip \
       run: |
         if [[ $ARTIFACT_NAME == *"nightly"* ]]; then
           url="https://nightly.link/Bromeon/godot4-nightly/workflows/compile-godot-nightly/master/$ARTIFACT_NAME.zip"
+          # If a specific Godot revision should be used, rather than latest, use this:
+          # url="https://nightly.link/Bromeon/godot4-nightly/actions/runs/<WORKFLOW_RUN_ID>/$ARTIFACT_NAME.zip"
         else
           url="https://nightly.link/Bromeon/godot4-nightly/workflows/compile-godot-stable/master/$ARTIFACT_NAME.zip"
         fi
         
         curl "$url" -Lo artifact.zip --retry 3
-        unzip artifact.zip -d $RUNNER_DIR/godot_bin
+        unzip -q artifact.zip -d $RUNNER_DIR/godot_bin
       shell: bash
 
     - name: "Prepare Godot executable"

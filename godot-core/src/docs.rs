@@ -23,6 +23,8 @@ use std::collections::HashMap;
 pub struct StructDocs {
     pub base: &'static str,
     pub description: &'static str,
+    pub experimental: &'static str,
+    pub deprecated: &'static str,
     pub members: &'static str,
 }
 
@@ -86,9 +88,9 @@ pub fn gather_xml_docs() -> impl Iterator<Item = String> {
                 ..
             }) => map.entry(class_name).or_default().virtual_methods = virtual_method_docs,
 
-            PluginItem::Struct(Struct {
-                docs: Some(docs), ..
-            }) => map.entry(class_name).or_default().definition = docs,
+            PluginItem::Struct(Struct { docs, .. }) => {
+                map.entry(class_name).or_default().definition = docs
+            }
 
             _ => (),
         }
@@ -98,6 +100,8 @@ pub fn gather_xml_docs() -> impl Iterator<Item = String> {
             let StructDocs {
                 base,
                 description,
+                experimental,
+                deprecated,
                 members,
             } = pieces.definition;
 
@@ -112,13 +116,14 @@ pub fn gather_xml_docs() -> impl Iterator<Item = String> {
                 .then(String::new)
                 .unwrap_or_else(|| format!("<methods>{methods}{virtual_methods}</methods>"));
 
-            let brief = description
-                .split_once("[br]")
-                .map(|(x, _)| x)
-                .unwrap_or_default();
+            let (brief, description) = match description
+                .split_once("[br]") {
+                    Some((brief, description)) => (brief, description.trim_start_matches("[br]")),
+                    None => (description, ""),
+                };
 
             format!(r#"<?xml version="1.0" encoding="UTF-8"?>
-<class name="{class}" inherits="{base}" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+<class name="{class}" inherits="{base}"{deprecated}{experimental} xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
 <brief_description>{brief}</brief_description>
 <description>{description}</description>
 {methods_block}

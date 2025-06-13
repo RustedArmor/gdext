@@ -5,11 +5,11 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use godot::builtin::{dict, Color, Dictionary, GString, Variant, VariantType};
+use godot::builtin::{dict, vslice, Color, Dictionary, GString, Variant, VariantType};
 use godot::classes::{INode, IRefCounted, Node, Object, RefCounted, Resource, Texture};
 use godot::global::{PropertyHint, PropertyUsageFlags};
 use godot::meta::{GodotConvert, PropertyHintInfo, ToGodot};
-use godot::obj::{Base, EngineBitfield, EngineEnum, Gd, NewAlloc, NewGd};
+use godot::obj::{Base, EngineBitfield, EngineEnum, Gd, NewAlloc, NewGd, OnEditor};
 use godot::register::property::{Export, Var};
 use godot::register::{godot_api, Export, GodotClass, GodotConvert, Var};
 use godot::test::itest;
@@ -44,7 +44,7 @@ struct HasProperty {
     object_val: Option<Gd<Object>>,
 
     #[var]
-    texture_val: Gd<Texture>,
+    texture_val: OnEditor<Gd<Texture>>,
 
     #[var(get = get_texture_val, set = set_texture_val, hint = RESOURCE_TYPE, hint_string = "Texture")]
     texture_val_rw: Option<Gd<Texture>>,
@@ -139,7 +139,7 @@ impl INode for HasProperty {
             int_val_setter: 0,
             object_val: None,
             string_val: GString::new(),
-            texture_val: Texture::new_gd(),
+            texture_val: OnEditor::default(),
             texture_val_rw: None,
         }
     }
@@ -521,7 +521,7 @@ fn test_var_with_renamed_funcs() {
     assert_eq!(obj.call("f1", &[]).to::<i32>(), 42);
     assert_eq!(obj.get("int_val").to::<i32>(), 42);
 
-    obj.call("f2", &[84.to_variant()]);
+    obj.call("f2", vslice![84]);
 
     assert_eq!(obj.bind().int_val, 84);
     assert_eq!(obj.bind().get_int_val(), 84);
@@ -536,6 +536,64 @@ fn test_var_with_renamed_funcs() {
     assert_eq!(obj.get("int_val").to::<i32>(), 128);
 
     obj.free();
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+
+#[derive(GodotClass)]
+#[class(init, base=Node)]
+struct Duplicator {
+    // #[export] would also make tests pass, but #[export(storage)] additionally hides the properties from the editor.
+    // See https://docs.godotengine.org/en/stable/tutorials/scripting/gdscript/gdscript_exports.html#export-storage.
+    #[export(storage)]
+    int_export: i32,
+
+    // Low-level #[var] should also work.
+    #[var(usage_flags = [STORAGE])]
+    int_var: i32,
+
+    // Not copied because not marked as serialize ("storage").
+    #[var]
+    int_ignored: i32,
+
+    #[export(storage)]
+    optional_node: Option<Gd<Node>>,
+
+    #[export(storage)]
+    oneditor_node: OnEditor<Gd<Node>>,
+}
+
+#[itest]
+fn test_duplicate_retains_properties() {
+    let optional_node = Node::new_alloc();
+    let oneditor_node = Node::new_alloc();
+
+    // Set up original node.
+    let mut original = Duplicator::new_alloc();
+    {
+        let mut original = original.bind_mut();
+        original.int_export = 5;
+        original.int_var = 7;
+        original.int_ignored = 9; // Will not be copied.
+        original.optional_node = Some(optional_node.clone());
+        original.oneditor_node.init(oneditor_node.clone());
+    }
+
+    // Create duplicate and verify all properties are copied correctly.
+    let duplicated: Gd<Duplicator> = original.duplicate().unwrap().cast();
+    {
+        let duplicated = duplicated.bind();
+        assert_eq!(duplicated.int_export, 5);
+        assert_eq!(duplicated.int_var, 7);
+        assert_eq!(duplicated.int_ignored, 0); // Not copied.
+        assert_eq!(duplicated.optional_node.as_ref().unwrap(), &optional_node);
+        assert_eq!(&*duplicated.oneditor_node, &oneditor_node);
+    }
+
+    optional_node.free();
+    oneditor_node.free();
+    duplicated.free();
+    original.free();
 }
 
 // ---------------------------------------------------------------

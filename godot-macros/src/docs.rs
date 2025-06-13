@@ -10,106 +10,114 @@ mod markdown_converter;
 use crate::class::{ConstDefinition, Field, FuncDefinition, SignalDefinition};
 use proc_macro2::{Ident, TokenStream};
 use quote::{quote, ToTokens};
-use venial::*;
 
-pub fn make_definition_docs(
+#[derive(Default)]
+struct XmlParagraphs {
+    /// XML content, as BBCode, to be used in `description` tag: `<description>VALUE</description>`.
+    description_content: String,
+    /// XML attribute, as BBCode: `experimental="EXPERIMENTAL"`.
+    /// Contains whole paragraph annotated with an `@experimental` tag.
+    experimental_attr: String,
+    /// XML attribute, as BBCode: `deprecated="DEPRECATED"`.
+    /// Contains whole paragraph annotated with a `@deprecated` tag.
+    deprecated_attr: String,
+}
+
+/// Returns code containing the doc information of a `#[derive(GodotClass)] struct MyClass` declaration iff class or any of its members is documented.
+pub fn document_struct(
     base: String,
-    description: &[Attribute],
-    members: &[Field],
+    description: &[venial::Attribute],
+    fields: &[Field],
 ) -> TokenStream {
     let base_escaped = xml_escape(base);
-    let Some(desc_escaped) = make_docs_from_attributes(description).map(xml_escape) else {
-        return quote! { None };
-    };
-    let members = members
+    let XmlParagraphs {
+        description_content,
+        deprecated_attr,
+        experimental_attr,
+    } = attribute_docs_to_xml_paragraphs(description).unwrap_or_default();
+
+    let members = fields
         .iter()
-        .filter(|x| x.var.is_some() | x.export.is_some())
-        .filter_map(member)
+        .filter(|field| field.var.is_some() || field.export.is_some())
+        .filter_map(format_member_xml)
         .collect::<String>();
+
     quote! {
-        Some(
             ::godot::docs::StructDocs {
                 base: #base_escaped,
-                description: #desc_escaped,
+                description: #description_content,
+                experimental: #experimental_attr,
+                deprecated: #deprecated_attr,
                 members: #members,
             }
-        )
     }
 }
 
-pub fn make_inherent_impl_docs(
+/// Returns code containing the doc information of a `#[godot_api] impl MyClass` declaration.
+pub fn document_inherent_impl(
     functions: &[FuncDefinition],
     constants: &[ConstDefinition],
     signals: &[SignalDefinition],
 ) -> TokenStream {
-    /// Generates TokenStream containing field definitions for documented methods and documentation blocks for constants and signals.
-    fn pieces(
-        functions: &[FuncDefinition],
-        signals: &[SignalDefinition],
-        constants: &[ConstDefinition],
-    ) -> TokenStream {
-        let to_tagged = |s: String, tag: &str| -> String {
-            if s.is_empty() {
-                s
-            } else {
-                format!("<{tag}>{s}</{tag}>")
-            }
-        };
+    let group_xml_block = |s: String, tag: &str| -> String {
+        if s.is_empty() {
+            s
+        } else {
+            format!("<{tag}>{s}</{tag}>")
+        }
+    };
 
-        let signals_block = to_tagged(
-            signals
-                .iter()
-                .filter_map(make_signal_docs)
-                .collect::<String>(),
-            "signals",
-        );
-        let constants_block = to_tagged(
-            constants
-                .iter()
-                .map(|ConstDefinition { raw_constant }| raw_constant)
-                .filter_map(make_constant_docs)
-                .collect::<String>(),
-            "constants",
-        );
+    let signal_xml_elems = signals
+        .iter()
+        .filter_map(format_signal_xml)
+        .collect::<String>();
+    let signals_block = group_xml_block(signal_xml_elems, "signals");
 
-        let methods = functions
-            .iter()
-            .filter_map(make_method_docs)
-            .collect::<String>();
+    let constant_xml_elems = constants
+        .iter()
+        .map(|ConstDefinition { raw_constant }| raw_constant)
+        .filter_map(format_constant_xml)
+        .collect::<String>();
+    let constants_block = group_xml_block(constant_xml_elems, "constants");
 
-        quote! {
-            ::godot::docs::InherentImplDocs {
-                methods: #methods,
-                signals_block: #signals_block,
-                constants_block: #constants_block,
-            }
+    let method_xml_elems = functions
+        .iter()
+        .filter_map(format_method_xml)
+        .collect::<String>();
+
+    quote! {
+        ::godot::docs::InherentImplDocs {
+            methods: #method_xml_elems,
+            signals_block: #signals_block,
+            constants_block: #constants_block,
         }
     }
-    pieces(functions, signals, constants)
 }
 
-pub fn make_virtual_impl_docs(vmethods: &[ImplMember]) -> TokenStream {
-    let virtual_methods = vmethods
+/// Returns code containing the doc information of a `#[godot_api] impl ITrait for MyClass` declaration.
+pub fn document_interface_trait_impl(impl_members: &[venial::ImplMember]) -> TokenStream {
+    let interface_methods = impl_members
         .iter()
         .filter_map(|x| match x {
             venial::ImplMember::AssocFunction(f) => Some(f.clone()),
             _ => None,
         })
-        .filter_map(make_virtual_method_docs)
+        .filter_map(format_virtual_method_xml)
         .collect::<String>();
 
-    quote! { #virtual_methods }
+    quote! { #interface_methods }
 }
 
 /// `///` is expanded to `#[doc = "…"]`.
-/// This function goes through and extracts the …
-fn siphon_docs_from_attributes(doc: &[Attribute]) -> impl Iterator<Item = String> + '_ {
+///
+/// This function goes through and extracts the "…" part.
+fn extract_docs_from_attributes(doc: &[venial::Attribute]) -> impl Iterator<Item = String> + '_ {
     doc.iter()
-        // find #[doc]
+        // Find #[doc].
         .filter(|x| x.get_single_path_segment().is_some_and(|x| x == "doc"))
-        // #[doc = "…"]
+        // Limit to occurrences with syntax #[doc = "…"].
         .filter_map(|x| match &x.value {
-            AttributeValue::Equals(_, doc) => Some(doc),
+            venial::AttributeValue::Equals(_, doc) => Some(doc),
             _ => None,
         })
         .flat_map(|doc| {
@@ -122,7 +130,7 @@ fn siphon_docs_from_attributes(doc: &[Attribute]) -> impl Iterator<Item = String
 }
 
 fn xml_escape(value: String) -> String {
-    // Most strings have no special characters, so this check helps avoid unnecessary string copying
+    // Most strings have no special characters, so this check helps avoid unnecessary string copying.
     if !value.contains(['&', '<', '>', '"', '\'']) {
         return value;
     }
@@ -143,39 +151,117 @@ fn xml_escape(value: String) -> String {
     result
 }
 
-/// Calls [`siphon_docs_from_attributes`] and converts the result to BBCode
-/// for Godot's consumption.
-fn make_docs_from_attributes(doc: &[Attribute]) -> Option<String> {
-    let doc = siphon_docs_from_attributes(doc)
-        .collect::<Vec<String>>()
-        .join("\n");
+/// Extracts docs from attributes and groups them in three Strings:
+/// user documentation content and paragraphs annotated with `@deprecated` or `@experimental` tags.
+fn docs_with_attributes(doc: &[venial::Attribute]) -> (String, String, String) {
+    let (mut docs, mut deprecated, mut experimental) =
+        (String::new(), String::new(), String::new());
 
-    (!doc.is_empty()).then(|| markdown_converter::to_bbcode(&doc))
+    // Allows to compare the current bucket (the one we put current paragraph in) with docs one.
+    let docs_bucket = std::ptr::from_ref(&docs);
+    let mut current_bucket: &mut String = &mut docs;
+
+    for line in extract_docs_from_attributes(doc) {
+        let trimmed = line.trim_start();
+
+        // End of the paragraph (`#[doc=""]` or `///`) .
+        if trimmed.is_empty() {
+            // Switch back from attribute docs to user docs when paragraph ends.
+            // Don't double newlines after XML attribute tags descriptions.
+            if !std::ptr::eq(current_bucket, docs_bucket) {
+                current_bucket = &mut docs;
+            } else {
+                current_bucket.push('\n');
+            }
+            continue;
+        }
+
+        // Check for `/// @deprecated` ... or `/// @experimental`
+        if trimmed.starts_with("@deprecated") {
+            current_bucket = &mut deprecated;
+            current_bucket.push_str(trimmed.trim_start_matches("@deprecated"));
+        } else if trimmed.starts_with("@experimental") {
+            current_bucket = &mut experimental;
+            current_bucket.push_str(trimmed.trim_start_matches("@experimental"));
+        } else {
+            current_bucket.push_str(&line);
+            current_bucket.push('\n');
+        }
+    }
+
+    (docs, deprecated, experimental)
 }
 
-fn make_signal_docs(signal: &SignalDefinition) -> Option<String> {
-    let name = &signal.signature.name;
-    let params = params(signal.signature.params.iter().filter_map(|(x, _)| match x {
-        FnParam::Receiver(_) => None,
-        FnParam::Typed(y) => Some((&y.name, &y.ty)),
-    }));
-    let desc = make_docs_from_attributes(&signal.external_attributes)?;
+/// Converts attribute docs to form suitable for Godot's consumption.
+///
+/// See also: [`XmlParagraphs`].
+fn attribute_docs_to_xml_paragraphs(doc: &[venial::Attribute]) -> Option<XmlParagraphs> {
+    let (docs, deprecated, experimental) = docs_with_attributes(doc);
+
+    if docs.is_empty() && deprecated.is_empty() && experimental.is_empty() {
+        return None;
+    }
+
+    let to_bbcode: fn(String) -> Option<String> =
+        |piece| (!piece.is_empty()).then(|| markdown_converter::to_bbcode(&piece));
+
+    let to_xml_attribute: fn(String, &str) -> String =
+        // Mind the whitespace before XML attribute declaration.
+        |description, attribute| format!(" {attribute}=\"{description}\"");
+
+    Some(XmlParagraphs {
+        description_content: to_bbcode(docs).map(xml_escape).unwrap_or_default(),
+        deprecated_attr: to_bbcode(deprecated)
+            .map(xml_escape)
+            .map(|s| to_xml_attribute(s, "deprecated"))
+            .unwrap_or_default(),
+        experimental_attr: to_bbcode(experimental)
+            .map(xml_escape)
+            .map(|s| to_xml_attribute(s, "experimental"))
+            .unwrap_or_default(),
+    })
+}
+
+fn format_venial_params_xml(params: &venial::Punctuated<venial::FnParam>) -> String {
+    let non_receiver_params = params.iter().filter_map(|(param, _punct)| match param {
+        venial::FnParam::Receiver(_) => None,
+        venial::FnParam::Typed(p) => Some((&p.name, &p.ty)),
+    });
+
+    format_params_xml(non_receiver_params)
+}
+
+fn format_signal_xml(signal: &SignalDefinition) -> Option<String> {
+    let name = &signal.fn_signature.name;
+    let name = xml_escape(name.to_string());
+
+    let params = format_venial_params_xml(&signal.fn_signature.params);
+
+    let XmlParagraphs {
+        description_content,
+        deprecated_attr,
+        experimental_attr,
+    } = attribute_docs_to_xml_paragraphs(&signal.external_attributes)?;
+
     Some(format!(
         r#"
-<signal name="{name}">
+<signal name="{name}"{deprecated_attr}{experimental_attr}>
   {params}
   <description>
-  {desc}
+  {description_content}
   </description>
 </signal>
-"#,
-        name = xml_escape(name.to_string()),
-        desc = xml_escape(desc),
+"#
     ))
 }
 
-fn make_constant_docs(constant: &Constant) -> Option<String> {
-    let docs = make_docs_from_attributes(&constant.attributes)?;
+fn format_constant_xml(constant: &venial::Constant) -> Option<String> {
+    let XmlParagraphs {
+        description_content,
+        deprecated_attr,
+        experimental_attr,
+    } = attribute_docs_to_xml_paragraphs(&constant.attributes)?;
+
     let name = constant.name.to_string();
     let value = constant
         .initializer
@@ -184,93 +270,113 @@ fn make_constant_docs(constant: &Constant) -> Option<String> {
         .unwrap_or_else(|| "null".to_string());
 
     Some(format!(
-        r#"<constant name="{name}" value="{value}">{docs}</constant>"#,
+        r#"<constant name="{name}" value="{value}"{deprecated_attr}{experimental_attr}>{description_content}</constant>"#,
         name = xml_escape(name),
         value = xml_escape(value),
-        docs = xml_escape(docs),
     ))
 }
 
-pub fn member(member: &Field) -> Option<String> {
-    let docs = make_docs_from_attributes(&member.attributes)?;
+pub fn format_member_xml(member: &Field) -> Option<String> {
+    let XmlParagraphs {
+        description_content,
+        deprecated_attr,
+        experimental_attr,
+    } = attribute_docs_to_xml_paragraphs(&member.attributes)?;
     let name = &member.name;
     let ty = member.ty.to_token_stream().to_string();
     let default = member.default_val.to_token_stream().to_string();
+
     Some(format!(
-        r#"<member name="{name}" type="{ty}" default="{default}">{docs}</member>"#,
+        r#"<member name="{name}" type="{ty}" default="{default}"{deprecated_attr}{experimental_attr}>{description_content}</member>"#,
         name = xml_escape(name.to_string()),
         ty = xml_escape(ty),
         default = xml_escape(default),
-        docs = xml_escape(docs),
     ))
 }
 
-fn params<'a, 'b>(params: impl Iterator<Item = (&'a Ident, &'b TypeExpr)>) -> String {
+fn format_params_xml<'a, 'b>(
+    params: impl Iterator<Item = (&'a Ident, &'b venial::TypeExpr)>,
+) -> String {
+    use std::fmt::Write;
+
     let mut output = String::new();
     for (index, (name, ty)) in params.enumerate() {
-        output.push_str(&format!(
+        write!(
+            output,
             r#"<param index="{index}" name="{name}" type="{ty}" />"#,
             name = xml_escape(name.to_string()),
             ty = xml_escape(ty.to_token_stream().to_string()),
-        ));
+        )
+        .expect("write to string failed");
     }
     output
 }
 
-pub fn make_virtual_method_docs(method: Function) -> Option<String> {
-    let desc = make_docs_from_attributes(&method.attributes)?;
-    let name = method.name.to_string();
-    let ret = method
-        .return_ty
-        .map(|x| x.to_token_stream().to_string())
-        .unwrap_or_else(|| "void".to_string());
+fn format_virtual_method_xml(method: venial::Function) -> Option<String> {
+    let XmlParagraphs {
+        description_content,
+        deprecated_attr,
+        experimental_attr,
+    } = attribute_docs_to_xml_paragraphs(&method.attributes)?;
 
-    let params = params(method.params.iter().filter_map(|(x, _)| match x {
-        FnParam::Receiver(_) => None,
-        FnParam::Typed(y) => Some((&y.name, &y.ty)),
-    }));
+    if !deprecated_attr.is_empty() || !experimental_attr.is_empty() {
+        panic!("Virtual methods can't be documented as neither `@experimental` nor `@deprecated`.");
+    }
+
+    let name = method.name.to_string();
+    let name = xml_escape(name);
+
+    let return_ty = method
+        .return_ty
+        .map(|ty| ty.to_token_stream().to_string())
+        .unwrap_or_else(|| "void".to_string());
+    let return_ty = xml_escape(return_ty);
+
+    let params = format_venial_params_xml(&method.params);
+
     Some(format!(
         r#"
 <method name="_{name}">
-  <return type="{ret}" />
+  <return type="{return_ty}" />
   {params}
   <description>
-  {desc}
+  {description_content}
   </description>
 </method>
-"#,
-        name = xml_escape(name),
-        ret = xml_escape(ret),
-        desc = xml_escape(desc),
+"#
     ))
 }
 
-pub fn make_method_docs(method: &FuncDefinition) -> Option<String> {
-    let desc = make_docs_from_attributes(&method.external_attributes)?;
+fn format_method_xml(method: &FuncDefinition) -> Option<String> {
+    let XmlParagraphs {
+        description_content,
+        deprecated_attr,
+        experimental_attr,
+    } = attribute_docs_to_xml_paragraphs(&method.external_attributes)?;
+
     let name = method
         .registered_name
         .clone()
-        .unwrap_or_else(|| method.signature_info.method_name.to_string());
-    let ret = method.signature_info.ret_type.to_token_stream().to_string();
-    let params = params(
-        method
-            .signature_info
-            .param_idents
-            .iter()
-            .zip(&method.signature_info.param_types),
-    );
+        .unwrap_or_else(|| method.rust_ident().to_string());
+    let name = xml_escape(name);
+
+    let signature = &method.signature_info;
+
+    let return_ty = signature.return_type.to_token_stream().to_string();
+    let return_ty = xml_escape(return_ty);
+
+    let param_names_and_types = signature.param_idents.iter().zip(&signature.param_types);
+    let params = format_params_xml(param_names_and_types);
+
     Some(format!(
         r#"
-<method name="{name}">
-  <return type="{ret}" />
+<method name="{name}"{deprecated_attr}{experimental_attr}>
+  <return type="{return_ty}" />
   {params}
   <description>
-  {desc}
+  {description_content}
   </description>
 </method>
-"#,
-        name = xml_escape(name),
-        ret = xml_escape(ret),
-        desc = xml_escape(desc),
+"#
     ))
 }

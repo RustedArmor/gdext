@@ -9,6 +9,7 @@ use godot::classes::{Engine, Node, Os};
 use godot::obj::Gd;
 use godot::sys;
 use std::collections::HashSet;
+use std::panic;
 
 mod bencher;
 mod runner;
@@ -24,10 +25,12 @@ pub use godot::test::{bench, itest};
 
 // Registers all the `#[itest]` tests and `#[bench]` benchmarks.
 sys::plugin_registry!(pub(crate) __GODOT_ITEST: RustTestCase);
+#[cfg(since_api = "4.2")]
+sys::plugin_registry!(pub(crate) __GODOT_ASYNC_ITEST: AsyncRustTestCase);
 sys::plugin_registry!(pub(crate) __GODOT_BENCH: RustBenchmark);
 
 /// Finds all `#[itest]` tests.
-fn collect_rust_tests(filters: &[String]) -> (Vec<RustTestCase>, usize, bool) {
+fn collect_rust_tests(filters: &[String]) -> (Vec<RustTestCase>, HashSet<&str>, bool) {
     let mut all_files = HashSet::new();
     let mut tests: Vec<RustTestCase> = vec![];
     let mut is_focus_run = false;
@@ -50,7 +53,38 @@ fn collect_rust_tests(filters: &[String]) -> (Vec<RustTestCase>, usize, bool) {
     // Sort alphabetically for deterministic run order
     tests.sort_by_key(|test| test.file);
 
-    (tests, all_files.len(), is_focus_run)
+    (tests, all_files, is_focus_run)
+}
+
+/// Finds all `#[itest(async)]` tests.
+#[cfg(since_api = "4.2")]
+fn collect_async_rust_tests(
+    filters: &[String],
+    sync_focus_run: bool,
+) -> (Vec<AsyncRustTestCase>, HashSet<&str>, bool) {
+    let mut all_files = HashSet::new();
+    let mut tests = vec![];
+    let mut is_focus_run = sync_focus_run;
+
+    sys::plugin_foreach!(__GODOT_ASYNC_ITEST; |test: &AsyncRustTestCase| {
+        // First time a focused test is encountered, switch to "focused" mode and throw everything away.
+        if !is_focus_run && test.focused {
+            tests.clear();
+            all_files.clear();
+            is_focus_run = true;
+        }
+
+        // Only collect tests if normal mode, or focus mode and test is focused.
+        if (!is_focus_run || test.focused) && passes_filter(filters, test.name) {
+            all_files.insert(test.file);
+            tests.push(*test);
+        }
+    });
+
+    // Sort alphabetically for deterministic run order
+    tests.sort_by_key(|test| test.file);
+
+    (tests, all_files, is_focus_run)
 }
 
 /// Finds all `#[bench]` benchmarks.
@@ -71,7 +105,7 @@ fn collect_rust_benchmarks() -> (Vec<RustBenchmark>, usize) {
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Shared types
-
+#[derive(Clone)]
 pub struct TestContext {
     pub scene_tree: Gd<Node>,
     pub property_tests: Gd<Node>,
@@ -108,6 +142,19 @@ pub struct RustTestCase {
     pub function: fn(&TestContext),
 }
 
+#[cfg(since_api = "4.2")]
+#[derive(Copy, Clone)]
+pub struct AsyncRustTestCase {
+    pub name: &'static str,
+    pub file: &'static str,
+    pub skipped: bool,
+    /// If one or more tests are focused, only they will be executed. Helpful for debugging and working on specific features.
+    pub focused: bool,
+    #[allow(dead_code)]
+    pub line: u32,
+    pub function: fn(&TestContext) -> godot::task::TaskHandle,
+}
+
 #[derive(Copy, Clone)]
 pub struct RustBenchmark {
     pub name: &'static str,
@@ -122,26 +169,81 @@ pub fn passes_filter(filters: &[String], test_name: &str) -> bool {
     filters.is_empty() || filters.iter().any(|x| test_name.contains(x))
 }
 
-pub fn expect_panic(context: &str, code: impl FnOnce()) {
-    use std::panic;
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+// Toolbox for tests
 
-    // Exchange panic hook, to disable printing during expected panics. Also disable gdext's panic printing.
+/// Swaps panic hooks, to disable printing during expected panics. Also disables gdext's panic printing.
+pub fn suppress_panic_log<R>(callback: impl FnOnce() -> R) -> R {
+    // DISABLE following lines to *temporarily* debug panics.
+    // Note that they currently print "itest `{}` failed", even if the test doesn't fail (which isn't usually relevant in suppressed mode).
     let prev_hook = panic::take_hook();
-    panic::set_hook(Box::new(|_panic_info| {}));
-    let prev_print_level = godot::private::set_error_print_level(0);
+    panic::set_hook(Box::new(
+        |_panic_info| { /* suppress panic hook; do nothing */ },
+    ));
 
+    // Keep following lines.
+    let prev_print_level = godot::private::set_error_print_level(0);
+    let res = callback();
+    godot::private::set_error_print_level(prev_print_level);
+
+    // DISABLE following line to *temporarily* debug panics.
+    panic::set_hook(prev_hook);
+
+    res
+}
+
+pub fn expect_panic(context: &str, code: impl FnOnce()) {
     // Generally, types should be unwind safe, and this helps ergonomics in testing (especially around &mut in expect_panic closures).
     let code = panic::AssertUnwindSafe(code);
-
-    // Run code that should panic, restore hook + gdext panic printing.
-    let panic = panic::catch_unwind(code);
-    panic::set_hook(prev_hook);
-    godot::private::set_error_print_level(prev_print_level);
+    let panic = suppress_panic_log(move || panic::catch_unwind(code));
 
     assert!(
         panic.is_err(),
         "code should have panicked but did not: {context}",
     );
+}
+
+pin_project_lite::pin_project! {
+    pub struct ExpectPanicFuture<T: std::future::Future> {
+        context: &'static str,
+        #[pin]
+        future: T,
+    }
+}
+
+impl<T: std::future::Future> std::future::Future for ExpectPanicFuture<T> {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let projection = self.project();
+        let future = projection.future;
+
+        // Run code that should panic, restore hook + gdext panic printing.
+        let panic = suppress_panic_log(move || {
+            panic::catch_unwind(panic::AssertUnwindSafe(move || future.poll(cx)))
+        });
+
+        match panic {
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(_) => std::task::Poll::Ready(()),
+            Ok(std::task::Poll::Ready(_)) => {
+                panic!(
+                    "code should have panicked but did not: {}",
+                    projection.context
+                );
+            }
+        }
+    }
+}
+
+pub fn expect_async_panic<T: std::future::Future>(
+    context: &'static str,
+    future: T,
+) -> ExpectPanicFuture<T> {
+    ExpectPanicFuture { context, future }
 }
 
 pub fn expect_debug_panic_or_release_ok(_context: &str, code: impl FnOnce()) {

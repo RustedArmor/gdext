@@ -1,8 +1,8 @@
 [package]
 name = "godot-bindings"
-version = "0.2.3"
+version = "0.3.1"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.87"
 license = "MPL-2.0"
 keywords = ["gamedev", "godot", "engine", "ffi", "sys"]
 categories = ["game-engines", "graphics"]
@@ -28,32 +28,35 @@ api-4-2 = []
 api-4-2-1 = []
 api-4-2-2 = []
 api-4-3 = []
+api-4-4 = []
 # ]]
 
 default = []
 
 api-custom = ["dep:bindgen", "dep:regex", "dep:which"]
+api-custom-json = ["dep:nanoserde", "dep:bindgen", "dep:regex", "dep:which"]
 api-custom-extheader = []
 
 [dependencies]
-gdextension-api = { version = "0.2.1", git = "https://github.com/godot-rust/godot4-prebuilt", branch = "releases" }
+gdextension-api = { workspace = true }
 
-# Do not use bindgen 0.69, it contains regression that forces recompilation of code.
-bindgen = { optional = true, version = "0.68", default-features = false, features = ["runtime"] }
-# regex >= 1.5.5 for security: https://blog.rust-lang.org/2022/03/08/cve-2022-24713.html
-# 'unicode-gencat' needed for \d, see: https://docs.rs/regex/1.5.5/regex/#unicode-features
-regex = { optional = true, version = "1.5.5", default-features = false, features = ["std", "unicode-gencat"] }
-which = { optional = true, version = "6" }
+bindgen = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+which = { workspace = true, optional = true }
+# Required by `api-custom-json` to parse the extension API JSON (to get the Godot version).
+nanoserde = { workspace = true, optional = true }
 
 [dev-dependencies]
-# For tests, we need regex unconditionally. Keep this in sync with above dependency.
-regex = { version = "1.5.5", default-features = false, features = ["std", "unicode-gencat"] }
+# For tests, we need regex unconditionally.
+regex = { workspace = true }
 
 # https://docs.rs/about/metadata
 [package.metadata.docs.rs]
 features = ["experimental-godot-api"]
 rustdoc-args = ["--cfg", "published_docs"]
+rustc-args = ["--cfg", "published_docs"]
 
-# Currently causes "unused manifest key" warnings. Maybe re-enable in the future, to make `published_docs` known.
-#[lints.rust]
-#unexpected_cfgs = { level = "warn", check-cfg = ['cfg(published_docs)'] }
+# Enabled only for godot-bindings; the others have it set via build.rs.
+# Necessary to avoid warnings in release workflow.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(published_docs)'] }

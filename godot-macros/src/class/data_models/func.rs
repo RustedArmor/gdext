@@ -31,6 +31,20 @@ pub struct FuncDefinition {
     pub rpc_info: Option<RpcAttr>,
 }
 
+impl FuncDefinition {
+    pub fn rust_ident(&self) -> &Ident {
+        &self.signature_info.method_name
+    }
+
+    pub fn godot_name(&self) -> String {
+        if let Some(name_override) = self.registered_name.as_ref() {
+            name_override.clone()
+        } else {
+            self.rust_ident().to_string()
+        }
+    }
+}
+
 /// Returns a C function which acts as the callback when a virtual method of this instance is invoked.
 //
 // Virtual methods are non-static by their nature; so there's no support for static ones.
@@ -44,7 +58,8 @@ pub fn make_virtual_callback(
 
     let wrapped_method =
         make_forwarding_closure(class_name, signature_info, before_kind, interface_trait);
-    let sig_tuple = signature_info.tuple_type();
+    let sig_params = signature_info.params_type();
+    let sig_ret = &signature_info.return_type;
 
     let call_ctx = make_call_context(
         class_name.to_string().as_str(),
@@ -55,7 +70,8 @@ pub fn make_virtual_callback(
     quote! {
         {
             use ::godot::sys;
-            type Sig = #sig_tuple;
+            type CallParams = #sig_params;
+            type CallRet = #sig_ret;
 
             unsafe extern "C" fn virtual_fn(
                 instance_ptr: sys::GDExtensionClassInstancePtr,
@@ -80,7 +96,8 @@ pub fn make_method_registration(
     interface_trait: Option<&venial::TypeExpr>,
 ) -> ParseResult<TokenStream> {
     let signature_info = &func_definition.signature_info;
-    let sig_tuple = signature_info.tuple_type();
+    let sig_params = signature_info.params_type();
+    let sig_ret = &signature_info.return_type;
 
     let is_script_virtual = func_definition.is_script_virtual;
     let method_flags = match make_method_flags(signature_info.receiver_type, is_script_virtual) {
@@ -96,13 +113,8 @@ pub fn make_method_registration(
     );
 
     // String literals
-    let method_name = &signature_info.method_name;
     let class_name_str = class_name.to_string();
-    let method_name_str = if let Some(updated_name) = func_definition.registered_name {
-        updated_name
-    } else {
-        method_name.to_string()
-    };
+    let method_name_str = func_definition.godot_name();
 
     let call_ctx = make_call_context(&class_name_str, &method_name_str);
     let varcall_fn_decl = make_varcall_fn(&call_ctx, &forwarding_closure);
@@ -128,7 +140,8 @@ pub fn make_method_registration(
             use ::godot::builtin::{StringName, Variant};
             use ::godot::sys;
 
-            type Sig = #sig_tuple;
+            type CallParams = #sig_params;
+            type CallRet = #sig_ret;
 
             let method_name = StringName::from(#method_name_str);
 
@@ -137,7 +150,7 @@ pub fn make_method_registration(
 
             // SAFETY: varcall_fn + ptrcall_fn interpret their in/out parameters correctly.
             let method_info = unsafe {
-                ClassMethodInfo::from_signature::<#class_name, Sig>(
+                ClassMethodInfo::from_signature::<#class_name, CallParams, CallRet>(
                     method_name,
                     Some(varcall_fn),
                     Some(ptrcall_fn),
@@ -178,8 +191,14 @@ pub struct SignatureInfo {
     pub method_name: Ident,
     pub receiver_type: ReceiverType,
     pub param_idents: Vec<Ident>,
+    /// Parameter types *without* receiver.
     pub param_types: Vec<venial::TypeExpr>,
-    pub ret_type: TokenStream,
+    pub return_type: TokenStream,
+
+    /// `(original index, new type)` only for changed parameters; empty if no changes.
+    ///
+    /// Index points into original venial tokens (i.e. takes into account potential receiver params).
+    pub modified_param_types: Vec<(usize, venial::TypeExpr)>,
 }
 
 impl SignatureInfo {
@@ -189,13 +208,14 @@ impl SignatureInfo {
             receiver_type: ReceiverType::Mut,
             param_idents: vec![],
             param_types: vec![],
-            ret_type: quote! { () },
+            return_type: quote! { () },
+            modified_param_types: vec![],
         }
     }
 
-    pub fn tuple_type(&self) -> TokenStream {
-        // Note: for GdSelf receivers, first parameter is not even part of SignatureInfo anymore.
-        util::make_signature_tuple_type(&self.ret_type, &self.param_types)
+    pub fn params_type(&self) -> TokenStream {
+        let param_types = &self.param_types;
+        quote! { (#(#param_types,)*) }
     }
 }
 
@@ -347,7 +367,8 @@ pub(crate) fn into_signature_info(
     };
 
     let mut next_unnamed_index = 0;
-    for (arg, _) in signature.params.inner {
+    let mut modified_param_types = vec![];
+    for (index, (arg, _)) in signature.params.inner.into_iter().enumerate() {
         match arg {
             venial::FnParam::Receiver(recv) => {
                 if receiver_type == ReceiverType::GdSelf {
@@ -365,8 +386,17 @@ pub(crate) fn into_signature_info(
             }
             venial::FnParam::Typed(arg) => {
                 let ident = maybe_rename_parameter(arg.name, &mut next_unnamed_index);
-                let ty = venial::TypeExpr {
-                    tokens: map_self_to_class_name(arg.ty.tokens, class_name),
+                let ty = match maybe_change_parameter_type(arg.ty, &method_name, index) {
+                    // Parameter type was modified.
+                    Ok(ty) => {
+                        modified_param_types.push((index, ty.clone()));
+                        ty
+                    }
+
+                    // Not an error, just unchanged.
+                    Err(ty) => venial::TypeExpr {
+                        tokens: map_self_to_class_name(ty.tokens, class_name),
+                    },
                 };
 
                 param_types.push(ty);
@@ -380,7 +410,29 @@ pub(crate) fn into_signature_info(
         receiver_type,
         param_idents,
         param_types,
-        ret_type,
+        return_type: ret_type,
+        modified_param_types,
+    }
+}
+
+/// If `f32` is used for a delta parameter in a virtual process function, transparently use `f64` behind the scenes.
+fn maybe_change_parameter_type(
+    param_ty: venial::TypeExpr,
+    method_name: &Ident,
+    param_index: usize,
+) -> Result<venial::TypeExpr, venial::TypeExpr> {
+    // A bit hackish, but TokenStream APIs are also notoriously annoying to work with. Not even PartialEq...
+
+    if param_index == 1
+        && (method_name == "process" || method_name == "physics_process")
+        && param_ty.tokens.len() == 1
+        && param_ty.tokens[0].to_string() == "f32"
+    {
+        Ok(venial::TypeExpr {
+            tokens: vec![TokenTree::Ident(ident("f64"))],
+        })
+    } else {
+        Err(param_ty)
     }
 }
 
@@ -473,7 +525,7 @@ fn make_ptrcall_fn(call_ctx: &TokenStream, wrapped_method: &TokenStream) -> Toke
         ) {
             let call_ctx = #call_ctx;
             let _success = ::godot::private::handle_panic(
-                || &call_ctx,
+                || format!("{call_ctx}"),
                 || #invocation
             );
 
@@ -493,7 +545,7 @@ fn make_ptrcall_invocation(wrapped_method: &TokenStream, is_virtual: bool) -> To
     };
 
     quote! {
-         <Sig as ::godot::meta::PtrcallSignatureTuple>::in_ptrcall(
+        ::godot::meta::Signature::<CallParams, CallRet>::in_ptrcall(
             instance_ptr,
             &call_ctx,
             args_ptr,
@@ -507,7 +559,7 @@ fn make_ptrcall_invocation(wrapped_method: &TokenStream, is_virtual: bool) -> To
 /// Generate code for a `varcall()` call expression.
 fn make_varcall_invocation(wrapped_method: &TokenStream) -> TokenStream {
     quote! {
-        <Sig as ::godot::meta::VarcallSignatureTuple>::in_varcall(
+        ::godot::meta::Signature::<CallParams, CallRet>::in_varcall(
             instance_ptr,
             &call_ctx,
             args_ptr,

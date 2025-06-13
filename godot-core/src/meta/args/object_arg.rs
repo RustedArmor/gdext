@@ -46,8 +46,8 @@ use std::ptr;
 /// | (null literal)    |                       | `Gd::null_arg()` |
 #[diagnostic::on_unimplemented(
     message = "Argument of type `{Self}` cannot be passed to an `impl AsObjectArg<{T}>` parameter",
-    note = "If you pass by value, consider borrowing instead.",
-    note = "See also `AsObjectArg` docs: https://godot-rust.github.io/docs/gdext/master/godot/meta/trait.AsObjectArg.html"
+    note = "if you pass by value, consider borrowing instead.",
+    note = "see also `AsObjectArg` docs: https://godot-rust.github.io/docs/gdext/master/godot/meta/trait.AsObjectArg.html"
 )]
 pub trait AsObjectArg<T>
 where
@@ -274,9 +274,7 @@ where
 {
     // If anything changes here, keep in sync with RawGd impl.
 
-    fn variant_type() -> sys::VariantType {
-        sys::VariantType::OBJECT
-    }
+    const VARIANT_TYPE: sys::VariantType = sys::VariantType::OBJECT;
 
     unsafe fn new_from_sys(_ptr: sys::GDExtensionConstTypePtr) -> Self {
         unreachable!("ObjectArg should only be passed *to* Godot, not *from*.")

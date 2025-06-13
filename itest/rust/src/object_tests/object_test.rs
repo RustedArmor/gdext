@@ -13,11 +13,9 @@ use std::rc::Rc;
 
 use godot::builtin::{GString, StringName, Variant, Vector3};
 use godot::classes::{
-    file_access, Area2D, Camera3D, Engine, FileAccess, IRefCounted, Node, Node3D, Object,
-    RefCounted,
+    file_access, Engine, FileAccess, IRefCounted, Node, Node2D, Node3D, Object, RefCounted,
 };
 #[allow(deprecated)]
-use godot::global::instance_from_id;
 use godot::meta::{FromGodot, GodotType, ToGodot};
 use godot::obj::{Base, Gd, Inherits, InstanceId, NewAlloc, NewGd, RawGd};
 use godot::register::{godot_api, GodotClass};
@@ -26,7 +24,7 @@ use godot::sys::{self, interface_fn, GodotFfi};
 use crate::framework::{expect_panic, itest, TestContext};
 
 // TODO:
-// * make sure that ptrcalls are used when possible (ie. when type info available; maybe GDScript integration test)
+// * make sure that ptrcalls are used when possible (i.e. when type info available; maybe GDScript integration test)
 // * Deref impl for user-defined types
 
 #[itest]
@@ -182,36 +180,6 @@ fn object_from_invalid_instance_id() {
         .expect_err("invalid instance id should not return a valid object");
 }
 
-// `instance_from_id` is a normal FFI call, so works slightly differently from `Gd::try_from_instance_id`.
-#[itest]
-fn object_instance_from_id() {
-    let node = Node::new_alloc();
-
-    assert!(node.is_instance_valid());
-
-    let instance_id = node.instance_id();
-
-    #[allow(deprecated)]
-    let gd_from_instance_id = instance_from_id(instance_id.to_i64())
-        .expect("instance should be valid")
-        .cast::<Node>();
-
-    assert_eq!(gd_from_instance_id, node);
-
-    node.free();
-}
-
-#[itest]
-fn object_instance_from_invalid_id() {
-    #[allow(deprecated)]
-    let gd_from_instance_id = instance_from_id(0);
-
-    assert!(
-        gd_from_instance_id.is_none(),
-        "instance id 0 should never be valid"
-    );
-}
-
 #[itest]
 fn object_from_instance_id_inherits_type() {
     let descr = GString::from("some very long description");
@@ -284,7 +252,14 @@ fn object_user_free_during_bind() {
         obj.is_instance_valid(),
         "object lives on after failed free()"
     );
+
+    let copy = obj.clone();
     obj.free(); // now succeeds
+
+    assert!(
+        !copy.is_instance_valid(),
+        "object is finally destroyed after successful free()"
+    );
 }
 
 #[itest]
@@ -514,10 +489,10 @@ fn check_convert_variant_refcount(obj: Gd<RefCounted>) {
 fn object_engine_convert_variant_nil() {
     let nil = Variant::nil();
 
-    Gd::<Area2D>::try_from_variant(&nil).expect_err("`nil` should not convert to `Gd<Area2D>`");
+    Gd::<Node2D>::try_from_variant(&nil).expect_err("`nil` should not convert to `Gd<Node2D>`");
 
     expect_panic("from_variant(&nil)", || {
-        Gd::<Area2D>::from_variant(&nil);
+        Gd::<Node2D>::from_variant(&nil);
     });
 }
 
@@ -526,12 +501,12 @@ fn object_engine_convert_variant_error() {
     let refc = RefCounted::new_gd();
     let variant = refc.to_variant();
 
-    let err = Gd::<Area2D>::try_from_variant(&variant)
-        .expect_err("`Gd<RefCounted>` should not convert to `Gd<Area2D>`");
+    let err = Gd::<Node2D>::try_from_variant(&variant)
+        .expect_err("`Gd<RefCounted>` should not convert to `Gd<Node2D>`");
 
     assert_eq!(
         err.to_string(),
-        format!("cannot convert to class Area2D: {refc:?}")
+        format!("cannot convert to class Node2D: {refc:?}")
     );
 }
 
@@ -705,11 +680,15 @@ fn object_engine_bad_downcast() {
 
 #[itest]
 fn object_engine_accept_polymorphic() {
-    let mut node = Camera3D::new_alloc();
+    let mut node = Node3D::new_alloc();
     let expected_name = StringName::from("Node name");
-    let expected_class = GString::from("Camera3D");
+    let expected_class = GString::from("Node3D");
 
+    // Node::set_name() changed to accept StringName, in https://github.com/godotengine/godot/pull/76560.
+    #[cfg(before_api = "4.5")]
     node.set_name(expected_name.arg());
+    #[cfg(since_api = "4.5")]
+    node.set_name(&expected_name);
 
     let actual_name = accept_node(node.clone());
     assert_eq!(actual_name, expected_name);
@@ -913,7 +892,7 @@ pub(super) struct ObjPayload {}
 
 #[godot_api]
 impl ObjPayload {
-    #[signal]
+    #[signal(__no_builder)]
     fn do_use();
 
     #[func]
@@ -998,7 +977,9 @@ pub mod object_test_gd {
     }
     use nested::ObjectTest;
 
-    #[godot_api]
+    // Disabling signals allows nested::ObjectTest, which would fail otherwise due to generated decl-macro being out-of-scope.
+    #[godot_api(no_typed_signals)]
+    // #[hint(has_base_field = false)] // if we allow more fine-grained control in the future
     impl nested::ObjectTest {
         #[func]
         fn pass_object(&self, object: Gd<Object>) -> i64 {
@@ -1039,6 +1020,7 @@ pub mod object_test_gd {
 
         #[func]
         fn return_nested_self() -> Array<Gd<<Self as GodotClass>::Base>> {
+            // Forward compat: .upcast() here becomes a breaking change if we generalize AsArg to include derived->base conversions.
             array![&Self::return_self().upcast()]
         }
     }

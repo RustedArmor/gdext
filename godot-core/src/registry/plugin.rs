@@ -147,6 +147,10 @@ pub struct Struct {
 
     /// Godot low-level `create` function, wired up to library-generated `init`.
     ///
+    /// For `#[class(no_init)]`, behavior depends on Godot version:
+    /// - 4.5 and later: `None`
+    /// - until 4.4: a dummy function that fails, to not break hot reloading.
+    ///
     /// This is mutually exclusive with [`ITraitImpl::user_create_fn`].
     pub(crate) generated_create_fn: Option<GodotCreateFn>,
 
@@ -189,12 +193,12 @@ pub struct Struct {
 
     /// Documentation extracted from the struct's RustDoc.
     #[cfg(all(since_api = "4.3", feature = "register-docs"))]
-    pub(crate) docs: Option<StructDocs>,
+    pub(crate) docs: StructDocs,
 }
 
 impl Struct {
     pub fn new<T: GodotClass + cap::ImplementsGodotExports>(
-        #[cfg(all(since_api = "4.3", feature = "register-docs"))] docs: Option<StructDocs>,
+        #[cfg(all(since_api = "4.3", feature = "register-docs"))] docs: StructDocs,
     ) -> Self {
         Self {
             base_class_name: T::Base::class_name(),
@@ -219,6 +223,19 @@ impl Struct {
 
         #[cfg(since_api = "4.2")]
         set(&mut self.generated_recreate_fn, callbacks::recreate::<T>);
+        self
+    }
+
+    // Workaround for https://github.com/godot-rust/gdext/issues/874, before https://github.com/godotengine/godot/pull/99133 is merged in 4.5.
+    #[cfg(before_api = "4.5")]
+    pub fn with_generated_no_default<T: GodotClass>(mut self) -> Self {
+        set(&mut self.generated_create_fn, callbacks::create_null::<T>);
+
+        #[cfg(since_api = "4.2")]
+        set(
+            &mut self.generated_recreate_fn,
+            callbacks::recreate_null::<T>,
+        );
         self
     }
 
@@ -404,6 +421,13 @@ pub struct ITraitImpl {
             r_ret: sys::GDExtensionVariantPtr,
         ) -> sys::GDExtensionBool,
     >,
+    #[cfg(since_api = "4.2")]
+    pub(crate) validate_property_fn: Option<
+        unsafe extern "C" fn(
+            p_instance: sys::GDExtensionClassInstancePtr,
+            p_property: *mut sys::GDExtensionPropertyInfo,
+        ) -> sys::GDExtensionBool,
+    >,
 }
 
 impl ITraitImpl {
@@ -485,6 +509,15 @@ impl ITraitImpl {
         );
         self
     }
+
+    #[cfg(since_api = "4.2")]
+    pub fn with_validate_property<T: GodotClass + cap::GodotValidateProperty>(mut self) -> Self {
+        set(
+            &mut self.validate_property_fn,
+            callbacks::validate_property::<T>,
+        );
+        self
+    }
 }
 
 /// Representation of a `#[godot_dyn]` invocation.
@@ -494,6 +527,16 @@ impl ITraitImpl {
 pub struct DynTraitImpl {
     /// The class that this `dyn Trait` implementation corresponds to.
     class_name: ClassName,
+
+    /// Base inherited class required for `DynGd<T, D>` exports (i.e. one specified in `#[class(base = ...)]`).
+    ///
+    /// Godot doesn't guarantee availability of all the GDExtension classes through the ClassDb while generating `PropertyHintInfo` for our exports.
+    /// Therefore, we rely on the built-in inherited base class in such cases.
+    /// Only [`class_name`][DynTraitImpl::class_name] is available at the time of adding given `DynTraitImpl` to plugin registry with `#[godot_dyn]`;
+    /// It is important to fill this information before registration.
+    ///
+    /// See also [`get_dyn_property_hint_string`][crate::registry::class::get_dyn_property_hint_string].
+    pub(crate) parent_class_name: Option<ClassName>,
 
     /// TypeId of the `dyn Trait` object.
     dyn_trait_typeid: any::TypeId,
@@ -517,6 +560,7 @@ impl DynTraitImpl {
     {
         Self {
             class_name: T::class_name(),
+            parent_class_name: None,
             dyn_trait_typeid: std::any::TypeId::of::<D>(),
             erased_dynify_fn: callbacks::dynify_fn::<T, D>,
         }

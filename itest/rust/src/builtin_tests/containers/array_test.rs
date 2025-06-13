@@ -198,17 +198,6 @@ fn array_first_last() {
 }
 
 #[itest]
-fn array_binary_search() {
-    let array = array![1, 3];
-
-    assert_eq!(array.bsearch(0), 0);
-    assert_eq!(array.bsearch(1), 0);
-    assert_eq!(array.bsearch(2), 1);
-    assert_eq!(array.bsearch(3), 1);
-    assert_eq!(array.bsearch(4), 2);
-}
-
-#[itest]
 fn array_find() {
     let array = array![1, 2, 1];
 
@@ -263,6 +252,21 @@ fn array_set() {
 }
 
 #[itest]
+fn array_set_readonly() {
+    let mut array = array![1, 2].into_read_only();
+
+    #[cfg(debug_assertions)]
+    expect_panic("Mutating read-only array in Debug mode", || {
+        array.set(0, 3);
+    });
+
+    #[cfg(not(debug_assertions))]
+    array.set(0, 3); // silently fails.
+
+    assert_eq!(array.at(0), 1);
+}
+
+#[itest]
 fn array_push_pop() {
     let mut array = array![1, 2];
 
@@ -296,13 +300,6 @@ fn array_extend() {
     let other = array![3, 4];
     array.extend_array(&other);
     assert_eq!(array, array![1, 2, 3, 4]);
-}
-
-#[itest]
-fn array_sort() {
-    let mut array = array![2, 1];
-    array.sort_unstable();
-    assert_eq!(array, array![1, 2]);
 }
 
 #[itest]
@@ -402,9 +399,11 @@ fn untyped_array_return_from_godot_func() {
     assert_eq!(result, varray![child, Variant::nil(), NodePath::default()]);
 }
 
-// TODO All API functions that take a `Array` are even more obscure and not included in
-// `SELECTED_CLASSES`. Decide if this test is worth having `Texture2DArray` and `Image` and their
-// ancestors in the list.
+// Conditional, so we don't need Texture2DArray > ImageTextureLayered > TextureLayered > Texture in minimal codegen.
+// Potential alternatives (search for "typedarray::" in extension_api.json):
+// - ClassDB::class_get_signal_list() -> Array<Dictionary>
+// - Compositor::set_compositor_effects( Array<Gd<Compositor>> )
+#[cfg(feature = "codegen-full-experimental")]
 #[itest]
 fn typed_array_pass_to_godot_func() {
     use godot::classes::image::Format;
@@ -475,8 +474,23 @@ fn array_should_format_with_display() {
 }
 
 #[itest]
+fn array_sort_unstable() {
+    let mut array = array![2, 1];
+    array.sort_unstable();
+    assert_eq!(array, array![1, 2]);
+}
+
+#[itest]
 #[cfg(since_api = "4.2")]
-fn array_sort_custom() {
+fn array_sort_unstable_by() {
+    let mut array: Array<i32> = array![2, 1, 4, 3];
+    array.sort_unstable_by(|a, b| a.cmp(b));
+    assert_eq!(array, array![1, 2, 3, 4]);
+}
+
+#[itest]
+#[cfg(since_api = "4.2")]
+fn array_sort_unstable_custom() {
     let mut a = array![1, 2, 3, 4];
     let func = backwards_sort_callable();
     a.sort_unstable_custom(&func);
@@ -484,8 +498,32 @@ fn array_sort_custom() {
 }
 
 #[itest]
+fn array_bsearch() {
+    let array = array![1, 3];
+
+    assert_eq!(array.bsearch(0), 0);
+    assert_eq!(array.bsearch(1), 0);
+    assert_eq!(array.bsearch(2), 1);
+    assert_eq!(array.bsearch(3), 1);
+    assert_eq!(array.bsearch(4), 2);
+}
+
+#[itest]
 #[cfg(since_api = "4.2")]
-fn array_binary_search_custom() {
+fn array_bsearch_by() {
+    let a: Array<i32> = array![1, 2, 4, 5];
+
+    assert_eq!(a.bsearch_by(|e| e.cmp(&2)), Ok(1));
+    assert_eq!(a.bsearch_by(|e| e.cmp(&4)), Ok(2));
+
+    assert_eq!(a.bsearch_by(|e| e.cmp(&0)), Err(0));
+    assert_eq!(a.bsearch_by(|e| e.cmp(&3)), Err(2));
+    assert_eq!(a.bsearch_by(|e| e.cmp(&9)), Err(4));
+}
+
+#[itest]
+#[cfg(since_api = "4.2")]
+fn array_bsearch_custom() {
     let a = array![5, 4, 2, 1];
     let func = backwards_sort_callable();
     assert_eq!(a.bsearch_custom(1, &func), 3);
@@ -530,6 +568,18 @@ fn array_resize() {
 
     a.resize(0, &new);
     assert_eq!(a, Array::new());
+}
+
+// Tests that arrays of objects can be declared without explicit type annotations. A similar test exists for DynGd in dyn_gd_test.rs.
+// This has deliberately been added to guard against regressions in case `AsArg` is extended (T: Inherits<Base> support broke this).
+fn __array_type_inference() {
+    let a = Node::new_alloc();
+    let b = Node::new_alloc();
+    let _array = array![&a, &b];
+
+    let c = ArrayTest::new_gd();
+    let d = ArrayTest::new_gd();
+    let _array = array![&c, &d];
 }
 
 #[derive(GodotClass, Debug)]

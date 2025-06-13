@@ -16,6 +16,25 @@
 
 #![cfg_attr(test, allow(unused))]
 
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+// Validations
+
+// More validations in godot crate. #[cfg]s are checked in godot-core.
+
+#[cfg(all(feature = "codegen-lazy-fptrs", feature = "experimental-threads"))]
+compile_error!(
+    "Cannot combine `lazy-function-tables` and `experimental-threads` features;\n\
+    thread safety for lazy-loaded function pointers is not yet implemented."
+);
+
+#[cfg(all(
+    feature = "experimental-wasm-nothreads",
+    feature = "experimental-threads"
+))]
+compile_error!("Cannot use 'experimental-threads' with a nothreads Wasm build yet.");
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+
 // Output of generated code. Mimics the file structure, symbols are re-exported.
 #[rustfmt::skip]
 #[allow(
@@ -42,14 +61,17 @@ mod plugins;
 mod string_cache;
 mod toolbox;
 
-// See https://github.com/dtolnay/paste/issues/69#issuecomment-962418430
-// and https://users.rust-lang.org/t/proc-macros-using-third-party-crate/42465/4
-#[doc(hidden)]
-pub use paste;
-
 #[doc(hidden)]
 #[cfg(target_family = "wasm")]
-pub use gensym::gensym;
+pub use godot_macros::wasm_declare_init_fn;
+
+// No-op otherwise.
+#[doc(hidden)]
+#[cfg(not(target_family = "wasm"))]
+#[macro_export]
+macro_rules! wasm_declare_init_fn {
+    () => {};
+}
 
 pub use crate::godot_ffi::{GodotFfi, GodotNullableFfi, PrimitiveConversionError, PtrcallType};
 
@@ -60,8 +82,7 @@ pub use gen::table_editor_classes::*;
 pub use gen::table_scene_classes::*;
 pub use gen::table_servers_classes::*;
 pub use gen::table_utilities::*;
-#[cfg(since_api = "4.4")]
-pub use gen::virtual_hashes as known_virtual_hashes;
+pub use gen::virtual_consts as godot_virtual_consts;
 
 // Other
 pub use extras::*;
@@ -83,6 +104,9 @@ use binding::{
     initialize_binding, initialize_builtin_method_table, initialize_class_editor_method_table,
     initialize_class_scene_method_table, initialize_class_server_method_table, runtime_metadata,
 };
+
+#[cfg(not(wasm_nothreads))]
+static MAIN_THREAD_ID: ManualInitCell<std::thread::ThreadId> = ManualInitCell::new();
 
 /// Stage of the Godot initialization process.
 ///
@@ -166,6 +190,14 @@ pub unsafe fn initialize(
         "Godot version against which gdext was compiled: {}",
         GdextBuild::godot_static_version_string()
     );
+
+    // We want to initialize the main thread ID as early as possible.
+    //
+    // SAFETY: We set the main thread ID exactly once here and never again.
+    #[cfg(not(wasm_nothreads))]
+    unsafe {
+        MAIN_THREAD_ID.set(std::thread::current().id())
+    };
 
     // Before anything else: if we run into a Godot binary that's compiled differently from gdext, proceeding would be UB -> panic.
     interface_init::ensure_static_runtime_compatibility(get_proc_address);
@@ -378,6 +410,32 @@ pub unsafe fn godot_has_feature(
     }
 
     return_ptr
+}
+
+/// Get the [`ThreadId`](std::thread::ThreadId) of the main thread.
+///
+/// # Panics
+/// - If it is called before the engine bindings have been initialized.
+#[cfg(not(wasm_nothreads))]
+pub fn main_thread_id() -> std::thread::ThreadId {
+    assert!(
+        MAIN_THREAD_ID.is_initialized(),
+        "Godot engine not available; make sure you are not calling it from unit/doc tests"
+    );
+
+    // SAFETY: We initialized the cell during library initialization, before any other code is executed.
+    let thread_id = unsafe { MAIN_THREAD_ID.get_unchecked() };
+
+    *thread_id
+}
+
+/// Check if the current thread is the main thread.
+///
+/// # Panics
+/// - If it is called before the engine bindings have been initialized.
+#[cfg(not(wasm_nothreads))]
+pub fn is_main_thread() -> bool {
+    std::thread::current().id() == main_thread_id()
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------

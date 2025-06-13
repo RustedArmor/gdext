@@ -55,6 +55,20 @@ impl FromGodot for String {
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
+// Encoding
+
+/// Specifies string encoding.
+///
+/// Used in functions such as [`GString::try_from_bytes()`][GString::try_from_bytes] to handle multiple input string encodings.
+#[non_exhaustive]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum Encoding {
+    Ascii,
+    Latin1,
+    Utf8,
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
 
 /// Returns a tuple of `(from, len)` from a Rust range.
 ///
@@ -139,5 +153,50 @@ fn found_to_option(index: i64) -> Option<usize> {
             .unwrap_or_else(|_| panic!("unexpected index {index} returned from Godot function"));
 
         Some(index_usize)
+    }
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+// Padding, alignment and precision support
+
+// Used by sub-modules of this module.
+use standard_fmt::pad_if_needed;
+
+mod standard_fmt {
+    use std::fmt;
+    use std::fmt::Write;
+
+    pub fn pad_if_needed<F>(f: &mut fmt::Formatter<'_>, display_impl: F) -> fmt::Result
+    where
+        F: Fn(&mut fmt::Formatter<'_>) -> fmt::Result,
+    {
+        let needs_format = f.width().is_some() || f.precision().is_some() || f.align().is_some();
+
+        // Early exit if no custom formatting is needed.
+        if !needs_format {
+            return display_impl(f);
+        }
+
+        let ic = FmtInterceptor { display_impl };
+
+        let mut local_str = String::new();
+        write!(&mut local_str, "{ic}")?;
+        f.pad(&local_str)
+    }
+
+    struct FmtInterceptor<F>
+    where
+        F: Fn(&mut fmt::Formatter<'_>) -> fmt::Result,
+    {
+        display_impl: F,
+    }
+
+    impl<F> fmt::Display for FmtInterceptor<F>
+    where
+        F: Fn(&mut fmt::Formatter<'_>) -> fmt::Result,
+    {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            (self.display_impl)(f)
+        }
     }
 }

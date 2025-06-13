@@ -9,7 +9,7 @@
 
 use crate::class::FuncDefinition;
 use crate::ParseResult;
-use proc_macro2::{Delimiter, Group, Ident, Literal, Punct, Spacing, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
 use quote::spanned::Spanned;
 use quote::{format_ident, quote, ToTokens, TokenStreamExt};
 
@@ -64,11 +64,15 @@ macro_rules! require_api_version {
     };
 }
 
-pub fn error_fn<T>(msg: impl AsRef<str>, tokens: T) -> venial::Error
-where
-    T: Spanned,
-{
-    venial::Error::new_at_span(tokens.__span(), msg.as_ref())
+/// Returns the span of the given tokens.
+pub fn span_of<T: Spanned>(tokens: &T) -> Span {
+    // Use of private API due to lack of alternative. If this becomes an issue, we'll find another way.
+    tokens.__span()
+}
+
+pub fn error_fn<T: Spanned>(msg: impl AsRef<str>, tokens: T) -> venial::Error {
+    let span = span_of(&tokens);
+    venial::Error::new_at_span(span, msg.as_ref())
 }
 
 macro_rules! error {
@@ -83,7 +87,7 @@ pub(crate) use require_api_version;
 
 pub fn reduce_to_signature(function: &venial::Function) -> venial::Function {
     let mut reduced = function.clone();
-    reduced.vis_marker = None; // TODO needed?
+    reduced.vis_marker = None; // retained outside in the case of #[signal].
     reduced.attributes.clear();
     reduced.tk_semicolon = None;
     reduced.body = None;
@@ -107,13 +111,10 @@ pub fn parse_signature(mut signature: TokenStream) -> venial::Function {
     reduce_to_signature(&function_item)
 }
 
-/// Returns a type expression that can be used as a `VarcallSignatureTuple`.
-pub fn make_signature_tuple_type(
-    ret_type: &TokenStream,
-    param_types: &[venial::TypeExpr],
-) -> TokenStream {
+/// Returns a type expression that can be used as a `ParamTuple`.
+pub fn make_signature_param_type(param_types: &[venial::TypeExpr]) -> TokenStream {
     quote::quote! {
-        (#ret_type, #(#param_types),*)
+        (#(#param_types,)*)
     }
 }
 
@@ -170,10 +171,10 @@ pub(crate) fn validate_impl(
 /// Validates that the declaration is the of the form `impl Trait for SomeType`, where the name of `Trait` begins with `I`.
 ///
 /// Returns `(class_name, trait_path, trait_base_class)`, e.g. `(MyClass, godot::prelude::INode3D, Node3D)`.
-pub(crate) fn validate_trait_impl_virtual<'a>(
-    original_impl: &'a venial::Impl,
+pub(crate) fn validate_trait_impl_virtual(
+    original_impl: &venial::Impl,
     attr: &str,
-) -> ParseResult<(Ident, &'a venial::TypeExpr, Ident)> {
+) -> ParseResult<(Ident, venial::TypeExpr, Ident)> {
     let trait_name = original_impl.trait_ty.as_ref().unwrap(); // unwrap: already checked outside
     let typename = extract_typename(trait_name);
 
@@ -191,7 +192,7 @@ pub(crate) fn validate_trait_impl_virtual<'a>(
     // Validate self
     validate_self(original_impl, attr).map(|class_name| {
         // let trait_name = typename.unwrap(); // unwrap: already checked in 'Validate trait'
-        (class_name, trait_name, base_class)
+        (class_name, trait_name.clone(), base_class)
     })
 }
 
@@ -360,12 +361,8 @@ pub fn make_funcs_collection_constant(
         None => func_name.to_string(),
     };
 
-    let doc_comment =
-        format!("The Rust function `{func_name}` is registered with Godot as `{const_value}`.");
-
     quote! {
         #(#attributes)*
-        #[doc = #doc_comment]
         #[doc(hidden)]
         #[allow(non_upper_case_globals)]
         pub const #const_name: &str  = #const_value;
@@ -409,5 +406,20 @@ pub fn format_funcs_collection_constant(_class_name: &Ident, func_name: &Ident) 
 
 /// Returns the name of the struct used as collection for all function name constants.
 pub fn format_funcs_collection_struct(class_name: &Ident) -> Ident {
-    format_ident!("__gdext_{class_name}_Funcs")
+    format_ident!("__godot_{class_name}_Funcs")
+}
+
+/// Returns the name of the macro used to communicate the `struct` (class) visibility to other symbols.
+pub fn format_class_visibility_macro(class_name: &Ident) -> Ident {
+    format_ident!("__godot_{class_name}_vis_macro")
+}
+
+/// Returns the name of the macro used to communicate whether the `struct` (class) contains a base field.
+pub fn format_class_base_field_macro(class_name: &Ident) -> Ident {
+    format_ident!("__godot_{class_name}_has_base_field_macro")
+}
+
+/// Returns the name of the macro used to deny manual `init()` for incompatible init strategies.
+pub fn format_class_deny_manual_init_macro(class_name: &Ident) -> Ident {
+    format_ident!("__deny_manual_init_{class_name}")
 }

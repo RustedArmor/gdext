@@ -71,12 +71,6 @@ impl_vector_fns!(Vector2, RVec2, real, (x, y));
 
 /// # Specialized `Vector2` functions
 impl Vector2 {
-    #[deprecated = "Moved to `Vector2i::cast_float()`"]
-    #[inline]
-    pub const fn from_vector2i(v: Vector2i) -> Self {
-        v.cast_float()
-    }
-
     /// Creates a unit Vector2 rotated to the given `angle` in radians. This is equivalent to doing `Vector2::new(angle.cos(), angle.sin())`
     /// or `Vector2::RIGHT.rotated(angle)`.
     ///
@@ -187,9 +181,7 @@ impl fmt::Display for Vector2 {
 // SAFETY:
 // This type is represented as `Self` in Godot, so `*mut Self` is sound.
 unsafe impl GodotFfi for Vector2 {
-    fn variant_type() -> sys::VariantType {
-        sys::VariantType::VECTOR2
-    }
+    const VARIANT_TYPE: sys::VariantType = sys::VariantType::VECTOR2;
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }

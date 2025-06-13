@@ -23,8 +23,11 @@ pub struct Context<'a> {
     native_structures_types: HashSet<&'a str>,
     singletons: HashSet<&'a str>,
     inheritance_tree: InheritanceTree,
+    /// Which interface traits are generated (`false` for "Godot-abstract"/final classes).
+    classes_final: HashMap<TyName, bool>,
     cached_rust_types: HashMap<GodotTy, RustTy>,
     notifications_by_class: HashMap<TyName, Vec<(Ident, i32)>>,
+    classes_with_signals: HashSet<TyName>,
     notification_enum_names_by_class: HashMap<TyName, NotificationEnum>,
     method_table_indices: HashMap<MethodTableKey, usize>,
     method_table_next_index: HashMap<String, usize>,
@@ -63,8 +66,15 @@ impl<'a> Context<'a> {
                 continue;
             }
 
-            // Populate class lookup by name
+            // Populate class lookup by name.
             engine_classes.insert(class_name.clone(), class);
+
+            if !option_as_slice(&class.signals).is_empty() {
+                ctx.classes_with_signals.insert(class_name.clone());
+            }
+
+            ctx.classes_final
+                .insert(class_name.clone(), ctx.is_class_final(&class_name));
 
             // Populate derived-to-base relations
             if let Some(base) = class.inherits.as_ref() {
@@ -114,8 +124,12 @@ impl<'a> Context<'a> {
                     break;
                 }
             }
-            let (nearest_index, nearest_enum_name) =
-                nearest.expect("at least one base must have notifications");
+            let (nearest_index, nearest_enum_name) = nearest.unwrap_or_else(|| {
+                panic!(
+                    "class {}: at least one base must have notifications; possibly, its direct base has been removed from minimal codegen",
+                    class_name.godot_ty
+                )
+            });
 
             // For all bases inheriting most-derived base that has notification constants, reuse the type name.
             for i in (0..nearest_index).rev() {
@@ -236,6 +250,21 @@ impl<'a> Context<'a> {
             .unwrap_or_else(|| panic!("did not register table index for key {:?}", key))
     }
 
+    /// Whether an interface trait is generated for a class.
+    ///
+    /// False if the class is "Godot-abstract"/final, thus there are no virtual functions to inherit.
+    fn is_class_final(&self, class_name: &TyName) -> bool {
+        debug_assert!(
+            !self.singletons.is_empty(),
+            "initialize singletons before final-check"
+        );
+
+        self.singletons.contains(class_name.godot_ty.as_str())
+            || special_cases::is_class_abstract(class_name)
+    }
+
+    // ------------------------------------------------------------------------------------------------------------------------------------------
+
     /// Checks if this is a builtin type (not `Object`).
     ///
     /// Note that builtins != variant types.
@@ -262,8 +291,17 @@ impl<'a> Context<'a> {
         self.native_structures_types.contains(ty_name)
     }
 
-    pub fn is_singleton(&self, class_name: &str) -> bool {
-        self.singletons.contains(class_name)
+    pub fn is_singleton(&self, class_name: &TyName) -> bool {
+        self.singletons.contains(class_name.godot_ty.as_str())
+    }
+
+    pub fn is_final(&self, class_name: &TyName) -> bool {
+        *self.classes_final.get(class_name).unwrap_or_else(|| {
+            panic!(
+                "queried final status for class {}, but it is not registered",
+                class_name.godot_ty
+            )
+        })
     }
 
     pub fn inheritance_tree(&self) -> &InheritanceTree {
@@ -272,6 +310,24 @@ impl<'a> Context<'a> {
 
     pub fn find_rust_type(&'a self, ty: &GodotTy) -> Option<&'a RustTy> {
         self.cached_rust_types.get(ty)
+    }
+
+    /// Walks up in the hierarchy, and returns the first (nearest) base class which declares at least 1 signal.
+    ///
+    /// Always returns a result, as `Object` (the root) itself declares signals.
+    pub fn find_nearest_base_with_signals(&self, class_name: &TyName) -> TyName {
+        let tree = self.inheritance_tree();
+
+        let mut class = class_name.clone();
+        while let Some(base) = tree.direct_base(&class) {
+            if self.classes_with_signals.contains(&base) {
+                return base;
+            } else {
+                class = base;
+            }
+        }
+
+        panic!("Object (root) should always have signals")
     }
 
     pub fn notification_constants(&'a self, class_name: &TyName) -> Option<&'a Vec<(Ident, i32)>> {
@@ -290,7 +346,6 @@ impl<'a> Context<'a> {
         assert!(prev.is_none(), "no overwrites of RustTy");
     }
 }
-
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -352,7 +407,7 @@ impl InheritanceTree {
         self.derived_to_base.get(derived_name).cloned()
     }
 
-    /// Returns all base classes, without the class itself, in order from nearest to furthest (object).
+    /// Returns all base classes, without the class itself, in order from nearest to furthest (`Object`).
     pub fn collect_all_bases(&self, derived_name: &TyName) -> Vec<TyName> {
         let mut upgoer = derived_name;
         let mut result = vec![];

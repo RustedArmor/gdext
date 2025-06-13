@@ -122,9 +122,7 @@ unsafe impl<T> GodotFfi for RefArg<'_, T>
 where
     T: GodotFfi,
 {
-    fn variant_type() -> sys::VariantType {
-        T::variant_type()
-    }
+    const VARIANT_TYPE: sys::VariantType = T::VARIANT_TYPE;
 
     unsafe fn new_from_sys(_ptr: sys::GDExtensionConstTypePtr) -> Self {
         wrong_direction!(new_from_sys)
@@ -193,6 +191,6 @@ where
     }
 
     fn is_null(&self) -> bool {
-        self.shared_ref.map_or(true, T::is_null)
+        self.shared_ref.is_none_or(T::is_null)
     }
 }

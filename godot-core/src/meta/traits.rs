@@ -89,7 +89,7 @@ pub trait GodotType: GodotConvert<Via = Self> + sealed::Sealed + Sized + 'static
     #[doc(hidden)]
     fn property_info(property_name: &str) -> PropertyInfo {
         PropertyInfo {
-            variant_type: Self::Ffi::variant_type(),
+            variant_type: Self::Ffi::VARIANT_TYPE,
             class_name: Self::class_name(),
             property_name: builtin::StringName::from(property_name),
             hint_info: Self::property_hint_info(),
@@ -118,6 +118,12 @@ pub trait GodotType: GodotConvert<Via = Self> + sealed::Sealed + Sized + 'static
         ))
     }
 
+    /// Returns a string representation of the Godot type name, as it is used in several property hint contexts.
+    ///
+    /// Examples:
+    /// - `MyClass` for objects
+    /// - `StringName`, `AABB` or `int` for builtins
+    /// - `Array` for arrays
     #[doc(hidden)]
     fn godot_type_name() -> String;
 
@@ -165,7 +171,9 @@ pub trait ArrayElement: ToGodot + FromGodot + sealed::Sealed + meta::ParamType {
     // Note: several indirections in ArrayElement and the global `element_*` functions go through `GodotConvert::Via`,
     // to not require Self: GodotType. What matters is how array elements map to Godot on the FFI level (GodotType trait).
 
-    /// Returns the representation of this type as a type string.
+    /// Returns the representation of this type as a type string, e.g. `"4:"` for string, or `"24:34/MyClass"` for objects.
+    ///
+    /// (`4` and `24` are variant type ords; `34` is `PropertyHint::NODE_TYPE` ord).
     ///
     /// Used for elements in arrays (the latter despite `ArrayElement` not having a direct relation).
     ///
@@ -188,7 +196,7 @@ pub trait ArrayElement: ToGodot + FromGodot + sealed::Sealed + meta::ParamType {
 
 #[doc(hidden)]
 pub(crate) fn element_variant_type<T: ArrayElement>() -> VariantType {
-    <T::Via as GodotType>::Ffi::variant_type()
+    <T::Via as GodotType>::Ffi::VARIANT_TYPE
 }
 
 #[doc(hidden)]

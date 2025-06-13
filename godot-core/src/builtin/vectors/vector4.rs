@@ -72,11 +72,6 @@ impl_vector_fns!(Vector4, RVec4, real, (x, y, z, w));
 
 /// # Specialized `Vector4` functions
 impl Vector4 {
-    #[deprecated = "Moved to `Vector4i::cast_float()`"]
-    pub const fn from_vector4i(v: Vector4i) -> Self {
-        v.cast_float()
-    }
-
     #[doc(hidden)]
     #[inline]
     pub fn as_inner(&self) -> inner::InnerVector4 {
@@ -100,9 +95,7 @@ impl fmt::Display for Vector4 {
 // SAFETY:
 // This type is represented as `Self` in Godot, so `*mut Self` is sound.
 unsafe impl GodotFfi for Vector4 {
-    fn variant_type() -> sys::VariantType {
-        sys::VariantType::VECTOR4
-    }
+    const VARIANT_TYPE: sys::VariantType = sys::VariantType::VECTOR4;
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }

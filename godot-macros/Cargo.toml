@@ -1,8 +1,8 @@
 [package]
 name = "godot-macros"
-version = "0.2.3"
+version = "0.3.1"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.87"
 license = "MPL-2.0"
 keywords = ["gamedev", "godot", "engine", "derive", "macro"]
 categories = ["game-engines", "graphics"]
@@ -12,24 +12,28 @@ homepage = "https://godot-rust.github.io"
 
 [features]
 api-custom = ["godot-bindings/api-custom"]
-register-docs = ["dep:markdown", "dep:litrs"]
+api-custom-json = ["godot-bindings/api-custom-json"]
 codegen-full = ["godot/__codegen-full"]
+experimental-wasm = ["dep:libc"]
+register-docs = ["dep:markdown", "dep:litrs"]
 
 [lib]
 proc-macro = true
 
 [dependencies]
-# Minimum versions compatible with -Zminimal-versions
-proc-macro2 = "1.0.80" # Literal::c_string() added in 1.0.80.
-quote = "1.0.29"
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
 # Enabled by `docs`.
-markdown = { version = "=1.0.0-alpha.21", optional = true }
-litrs = { version = "0.4.1", optional = true }
-# Requires bugfixes from 0.6.1.
-venial = "0.6.1"
+markdown = { workspace = true, optional = true }
+litrs = { workspace = true, optional = true }
+venial = { workspace = true }
+
+# Cannot use [target.'cfg(target_family = "wasm")'.dependencies], as proc-macro crates are always compiled for host platform, not target.
+# Thus solved via feature.
+libc = { workspace = true, optional = true }
 
 [build-dependencies]
-godot-bindings = { path = "../godot-bindings", version = "=0.2.3" } # emit_godot_version_cfg
+godot-bindings = { path = "../godot-bindings", version = "=0.3.1" } # emit_godot_version_cfg
 
 # Reverse dev dependencies so doctests can use `godot::` prefix.
 [dev-dependencies]
@@ -39,6 +43,7 @@ godot = { path = "../godot", default-features = false}
 [package.metadata.docs.rs]
 features = ["experimental-godot-api"]
 rustdoc-args = ["--cfg", "published_docs"]
+rustc-args = ["--cfg", "published_docs"]
 
 # Currently causes "unused manifest key" warnings. Maybe re-enable in the future, to make `published_docs` known.
 #[lints.rust]

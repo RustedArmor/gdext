@@ -8,7 +8,7 @@
 use crate::builtin::{
     GString, StringName, VariantArray, VariantDispatch, VariantOperator, VariantType,
 };
-use crate::meta::error::{ConvertError, ErrorKind, FromVariantError};
+use crate::meta::error::ConvertError;
 use crate::meta::{arg_into_ref, ArrayElement, AsArg, FromGodot, ToGodot};
 use godot_ffi as sys;
 use std::{fmt, ptr};
@@ -128,6 +128,7 @@ impl Variant {
 
         #[cfg(before_api = "4.4")]
         {
+            use crate::meta::error::{ErrorKind, FromVariantError};
             match self.try_to::<crate::obj::Gd<crate::classes::Object>>() {
                 Ok(obj) => Some(obj.instance_id_unchecked()),
                 Err(c)
@@ -273,7 +274,7 @@ impl Variant {
     pub(crate) fn is_object_alive(&self) -> bool {
         debug_assert_eq!(self.get_type(), VariantType::OBJECT);
 
-        crate::gen::utilities::is_instance_valid(self)
+        crate::global::is_instance_valid(self)
 
         // In case there are ever problems with this approach, alternative implementation:
         // self.stringify() != "<Freed Object>".into()
@@ -461,9 +462,7 @@ crate::meta::impl_asarg_by_ref!(Variant);
 // `from_opaque` properly initializes a dereferenced pointer to an `OpaqueVariant`.
 // `std::mem::swap` is sufficient for returning a value.
 unsafe impl GodotFfi for Variant {
-    fn variant_type() -> VariantType {
-        VariantType::NIL
-    }
+    const VARIANT_TYPE: VariantType = VariantType::NIL;
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }

@@ -42,8 +42,8 @@ use crate::obj::Inherits;
 ///
 /// To use script instances, implement this trait for your own type.
 ///
-/// You can use the [`create_script_instance()`] function to create a low-level pointer to your script instance.
-/// This pointer should then be returned from [`IScriptExtension::instance_create()`](crate::classes::IScriptExtension::instance_create).
+/// You can use the [`create_script_instance()`] function to create a low-level pointer to your script instance. This pointer should then be
+/// returned from [`IScriptExtension::instance_create_rawptr()`](crate::classes::IScriptExtension::instance_create_rawptr).
 ///
 /// # Example
 ///
@@ -120,9 +120,10 @@ pub trait ScriptInstance: Sized {
         args: &[&Variant],
     ) -> Result<Variant, sys::GDExtensionCallErrorType>;
 
-    /// Identifies the script instance as a placeholder. If this function and
-    /// [IScriptExtension::is_placeholder_fallback_enabled](crate::classes::IScriptExtension::is_placeholder_fallback_enabled) return true,
-    /// Godot will call [`Self::property_set_fallback`] instead of [`Self::set_property`].
+    /// Identifies the script instance as a placeholder, routing property writes to a fallback if applicable.
+    ///
+    /// If this function and [IScriptExtension::is_placeholder_fallback_enabled] return true, Godot will call [`Self::property_set_fallback`]
+    /// instead of [`Self::set_property`].
     fn is_placeholder(&self) -> bool;
 
     /// Validation function for the engine to verify if the script exposes a certain method.
@@ -157,8 +158,7 @@ pub trait ScriptInstance: Sized {
     /// The engine may call this function if it failed to get a property value via [`ScriptInstance::get_property`] or the native type's getter.
     fn property_get_fallback(&self, name: StringName) -> Option<Variant>;
 
-    /// The engine may call this function if
-    /// [`IScriptExtension::is_placeholder_fallback_enabled`](crate::classes::IScriptExtension::is_placeholder_fallback_enabled) is enabled.
+    /// The engine may call this function if [`IScriptExtension::is_placeholder_fallback_enabled`] is enabled.
     fn property_set_fallback(this: SiMut<Self>, name: StringName, value: &Variant) -> bool;
 
     /// This function will be called to handle calls to [`Object::get_method_argument_count`](crate::classes::Object::get_method_argument_count)
@@ -347,7 +347,7 @@ pub unsafe fn create_script_instance<T: ScriptInstance>(
 /// This function both checks if the passed script matches the one currently assigned to the passed object, as well as verifies that
 /// there is an instance for the script.
 ///
-/// Use this function to implement [`IScriptExtension::instance_has`](crate::classes::IScriptExtension::instance_has).
+/// Use this function to implement [`IScriptExtension::instance_has`].
 #[cfg(since_api = "4.2")]
 pub fn script_instance_exists<O, S>(object: &Gd<O>, script: &Gd<S>) -> bool
 where
@@ -362,7 +362,7 @@ where
 
     if object_script_variant
         .object_id()
-        .map_or(true, |instance_id| instance_id != script.instance_id())
+        .is_none_or(|instance_id| instance_id != script.instance_id())
     {
         return false;
     }
@@ -457,6 +457,9 @@ impl<'a, T: ScriptInstance> SiMut<'a, T> {
     /// Returns a mutable reference suitable for calling engine methods on this object.
     ///
     /// This method will allow you to call back into the same object from Godot (re-entrancy).
+    /// You have to keep the `ScriptBaseRef` guard bound for the entire duration the engine might re-enter a function of your
+    /// `ScriptInstance`. The guard temporarily absorbs the `&mut self` reference, which allows for an additional mutable reference to be
+    /// acquired.
     ///
     /// Holding a mutable guard prevents other code paths from obtaining _any_ reference to `self`, as such it is recommended to drop the
     /// guard as soon as you no longer need it.

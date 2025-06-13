@@ -7,6 +7,11 @@ name: godot
 description: "Run Godot integration tests"
 
 inputs:
+  godot-indirect-json:
+    required: false
+    default: ''
+    description: "If set to true, compiles godot-rust with the `api-custom-json` feature against the generated JSON file"
+
   artifact-name:
     required: true
     description: "Name of the compiled Godot artifact to download"
@@ -89,6 +94,7 @@ runs:
         with-llvm: ${{ inputs.with-llvm }}
         cache-key: ${{ inputs.rust-cache-key }}
 
+    # if
     - name: "Patch prebuilt version ({{ inputs.godot-prebuilt-patch }})"
       if: inputs.godot-prebuilt-patch != ''
       env:
@@ -109,7 +115,7 @@ runs:
       
         else
           echo "Update compatibility_minimum in .gdextension files to '$apiVersion'..."
-          dirs=("itest" "examples")
+          dirs=("itest")
         
           # Note that this is still hardcoded to 4.1, the start of GDExtension's compatibility promise. This makes it easier for users
           # to use gdext with older Godot versions. There is anyway a runtime check in gdext that checks compatibility again.
@@ -125,9 +131,18 @@ runs:
 
       shell: bash
 
+    # else if
+    - name: "Dump extension api"
+      if: inputs.godot-prebuilt-patch == '' && inputs.godot-indirect-json == 'true'
+      run: |
+        $GODOT4_BIN --headless --dump-extension-api
+        mv extension_api.json $RUNNER_DIR/godot_bin/extension_api.json
+        echo "GODOT4_GDEXTENSION_JSON=$RUNNER_DIR/godot_bin/extension_api.json" >> $GITHUB_ENV
+      shell: bash
+
     # else
     - name: "No patch selected"
-      if: inputs.godot-prebuilt-patch == ''
+      if: inputs.godot-prebuilt-patch == '' && inputs.godot-indirect-json != 'true'
       run: |
           echo "No patch selected; use default godot4-prebuilt version."
       shell: bash
@@ -142,9 +157,10 @@ runs:
           targetArgs="--target $TARGET"
         fi
         
+        # Keep `--no-default-features` even if it's currently redundant. Features may change.
         cargo build -p itest --no-default-features ${{ inputs.rust-extra-args }} $targetArgs
         
-        # Instead of modifying .gdextension, rename the output directory
+        # Instead of modifying .gdextension, rename the output directory.
         if [[ -n "$TARGET" ]]; then
           rm -rf target/debug
           mv target/$TARGET/debug target
@@ -157,6 +173,7 @@ runs:
       # * tee:      still output logs while scanning for errors
       # * grep -q:  no output, use exit code 0 if found -> thus also &&
       # * pkill:    stop Godot execution (since it hangs in headless mode); simple 'head -1' did not work as expected
+      #             since it's not available on Windows, use taskkill in that case.
       # * exit:     the terminated process would return 143, but this is more explicit and future-proof
       #
       # --disallow-focus: fail if #[itest(focus)] is encountered, to prevent running only a few tests for full CI
@@ -166,10 +183,14 @@ runs:
         $GODOT4_BIN --headless -- --disallow-focus ${{ inputs.godot-args }} 2>&1 \
         | tee "${{ runner.temp }}/log.txt" \
         | tee >(grep -E "SCRIPT ERROR:|Can't open dynamic library" -q && {
-        	printf "\n::error::godot-itest: unrecoverable Godot error, abort...\n";
-        	pkill godot
-            echo "OUTCOME=godot-runtime" >> $GITHUB_ENV
-        	exit 2
+          printf "\n::error::godot-itest: unrecoverable Godot error, abort...\n";
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            taskkill -f -im godot*
+          else
+            pkill godot
+          fi
+          echo "OUTCOME=godot-runtime" >> $GITHUB_ENV
+          exit 2
         })
         
         echo "OUTCOME=success" >> $GITHUB_ENV
@@ -198,14 +219,14 @@ runs:
           "godot-runtime")
             echo "### :x: Godot runtime error" > $GITHUB_STEP_SUMMARY
             echo "$GODOT_BUILT_FROM" >> $GITHUB_STEP_SUMMARY
-        	echo "Aborted due to an error during Godot execution." >> $GITHUB_STEP_SUMMARY
+            echo "Aborted due to an error during Godot execution." >> $GITHUB_STEP_SUMMARY
             exit 2
             ;;
         
           "godot-leak")
             echo "### :x: Memory leak" > $GITHUB_STEP_SUMMARY
             echo "$GODOT_BUILT_FROM" >> $GITHUB_STEP_SUMMARY
-        	echo "Integration tests cause memory leaks." >> $GITHUB_STEP_SUMMARY
+            echo "Integration tests cause memory leaks." >> $GITHUB_STEP_SUMMARY
             exit 3
             ;;
         

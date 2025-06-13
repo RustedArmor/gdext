@@ -122,7 +122,7 @@ pub fn make_function_definition(
     // Thus, let's keep things simple and more conservative.
     let (maybe_unsafe, maybe_safety_doc) = if let Some(safety_doc) = safety_doc {
         (quote! { unsafe }, safety_doc)
-    } else if function_uses_pointers(sig) {
+    } else if sig.common().is_unsafe {
         (
             quote! { unsafe },
             quote! {
@@ -177,9 +177,9 @@ pub fn make_function_definition(
     let call_sig_decl = {
         let return_ty = &sig.return_value().type_tokens();
 
-        // Build <'a0, 'a1, ...> for lifetimes.
         quote! {
-            type CallSig #callsig_lifetime_args = ( #return_ty, #(#param_types),* );
+            type CallRet = #return_ty;
+            type CallParams #callsig_lifetime_args = (#(#param_types,)*);
         }
     };
 
@@ -614,7 +614,7 @@ pub(crate) fn make_params_exprs_virtual<'a>(
             RustTy::EngineClass { .. }
                 if !special_cases::is_class_method_param_required(
                     function_sig.surrounding_class().unwrap(),
-                    function_sig.name(),
+                    function_sig.godot_name(),
                     param_name,
                 ) =>
             {
@@ -636,16 +636,4 @@ pub(crate) fn make_params_exprs_virtual<'a>(
     }
 
     ret
-}
-
-fn function_uses_pointers(sig: &dyn Function) -> bool {
-    let has_pointer_params = sig
-        .params()
-        .iter()
-        .any(|param| matches!(param.type_, RustTy::RawPointer { .. }));
-
-    let has_pointer_return = matches!(sig.return_value().type_, Some(RustTy::RawPointer { .. }));
-
-    // No short-circuiting due to variable decls, but that's fine.
-    has_pointer_params || has_pointer_return
 }
