@@ -13,15 +13,44 @@ use crate::util::bail;
 use crate::ParseResult;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+
+static SRAND_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+// Create sufficiently unique identifier without entire `uuid` (let alone `rand`) crate dependency.
+struct TrivialRng;
+
+impl TrivialRng {
+    fn rand() -> u32 {
+        if SRAND_INITIALIZED.compare_exchange(
+            false,
+            true,
+            Ordering::Acquire,
+            Ordering::Relaxed
+        ).is_ok() {
+            unsafe {
+                let time = libc::time(std::ptr::null_mut());
+                let pid = libc::getpid();
+                let seed_64bit = time ^ (pid as i64);
+                let upper_half = (seed_64bit >> 32) as u32;
+                let lower_half = seed_64bit as u32;
+                let seed = upper_half ^ lower_half;
+                libc::srand(seed);
+            }
+        }
+        unsafe { libc::rand() as u32 }
+    }
+}
+
 
 pub(super) fn wasm_declare_init_fn(input: TokenStream) -> ParseResult<TokenStream> {
     if !input.is_empty() {
         return bail!(input, "macro expects no arguments");
     }
 
-    // Create sufficiently unique identifier without entire `uuid` (let alone `rand`) crate dependency.
-    let a = unsafe { libc::rand() };
-    let b = unsafe { libc::rand() };
+    let a = TrivialRng::rand();
+    let b = TrivialRng::rand();
 
     // Rust presently requires that statics with a custom `#[link_section]` must be a simple
     // list of bytes on the Wasm target (with no extra levels of indirection such as references).
