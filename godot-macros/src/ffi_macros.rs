@@ -14,7 +14,6 @@ use crate::ParseResult;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::env;
-
 use std::sync::atomic::{AtomicU32, Ordering};
 
 static FUNCTION_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -24,9 +23,12 @@ pub(super) fn wasm_declare_init_fn(input: TokenStream) -> ParseResult<TokenStrea
         return bail!(input, "macro expects no arguments");
     }
 
-    let crate_name = env::var("CARGO_PKG_NAME")
-        .expect("CARGO_PKG_NAME env var not found. This macro must be run by Cargo.")
-        .replace('-', "_"); // crate names may contain hyphens, but Rust identifiers must not.
+    let crate_name = env::var("CARGO_CRATE_NAME")
+        .expect("CARGO_CRATE_NAME env var not found. This macro must be run by Cargo.");
+
+    let crate_version = env::var("CARGO_PKG_VERSION")
+        .expect("CARGO_PKG_VERSION env var not found. This macro must be run by Cargo.")
+        .replace(['.', '+', '-'], "_"); // version must follow semver, which allows digits, dots, hyphens, and plus signs, and alphanumeric characters.
 
     let index = FUNCTION_COUNTER.fetch_add(1, Ordering::Relaxed);
 
@@ -35,7 +37,8 @@ pub(super) fn wasm_declare_init_fn(input: TokenStream) -> ParseResult<TokenStrea
     //
     // As such, instead we export a function with a known prefix to be used by the embedder.
     // This prefix is queried at load time, see godot-macros/src/gdextension.rs.
-    let function_name = format_ident!("__godot_rust_registrant_{}_{}", crate_name, index);
+    let function_name =
+        format_ident!("__godot_rust_registrant_{crate_name}_{crate_version}_{index}");
 
     let code = quote! {
         #[cfg(target_family = "wasm")] // Strictly speaking not necessary, as this macro is only invoked for Wasm.
